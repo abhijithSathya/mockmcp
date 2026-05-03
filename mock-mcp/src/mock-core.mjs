@@ -1,5 +1,6 @@
 const SERVICE_NAME = "capacity-risk-booking-control-center-mock-mcp";
 const SERVICE_VERSION = "0.1.0";
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const BASE_NOW = "2026-05-03T10:30:00Z";
 const AREAS = ["NORTH", "SOUTH", "EAST", "WEST"];
 const TIME_SLOTS = ["08:00-12:00", "12:00-18:00"];
@@ -100,7 +101,9 @@ export async function handleHttpRequest(request, env = {}) {
     }
 
     if (request.method === "POST" && url.pathname === "/mcp") {
-      return responseJson(await handleMcp(await readJson(request)));
+      const result = await handleMcp(await readJson(request));
+      if (result === null) return responseEmpty(202);
+      return responseJson(result);
     }
 
     if (request.method === "POST" && url.pathname.startsWith("/tools/")) {
@@ -140,11 +143,12 @@ async function handleMcp(payload) {
   }
 
   if (payload.method === "initialize") {
+    const requestedVersion = payload.params?.protocolVersion;
     return {
       jsonrpc: "2.0",
       id: payload.id ?? null,
       result: {
-        protocolVersion: "2024-11-05",
+        protocolVersion: negotiateProtocolVersion(requestedVersion),
         serverInfo: { name: SERVICE_NAME, version: SERVICE_VERSION },
         capabilities: { tools: {} }
       }
@@ -176,6 +180,13 @@ async function handleMcp(payload) {
     id: payload.id ?? null,
     error: { code: -32601, message: `Unsupported method ${payload.method}` }
   };
+}
+
+function negotiateProtocolVersion(requestedVersion) {
+  if (SUPPORTED_PROTOCOL_VERSIONS.includes(requestedVersion)) {
+    return requestedVersion;
+  }
+  return "2025-03-26";
 }
 
 export async function callTool(name, args = {}) {
@@ -1218,7 +1229,19 @@ function responseJson(payload, status = 200) {
       "content-type": "application/json; charset=utf-8",
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id",
+      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id,mcp-protocol-version,mcp-method,mcp-name,last-event-id",
+      "access-control-expose-headers": "mcp-session-id"
+    }
+  });
+}
+
+function responseEmpty(status = 202) {
+  return new Response(null, {
+    status,
+    headers: {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id,mcp-protocol-version,mcp-method,mcp-name,last-event-id",
       "access-control-expose-headers": "mcp-session-id"
     }
   });
@@ -1235,7 +1258,7 @@ function responseSse(events, status = 200) {
       "cache-control": "no-cache",
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id",
+      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id,mcp-protocol-version,mcp-method,mcp-name,last-event-id",
       "access-control-expose-headers": "mcp-session-id"
     }
   });

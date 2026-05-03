@@ -38,6 +38,39 @@ test("supports StreamableHTTP MCP probes and text tool results", async () => {
   assert.ok(body.result.structuredContent.items[0].riskId.startsWith("RISK-"));
 });
 
+test("negotiates StreamableHTTP protocol and accepts notifications", async () => {
+  const initialize = await handleHttpRequest(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2025-03-26"
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "init-1",
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test-client", version: "0.0.1" }
+      }
+    })
+  }));
+  assert.equal(initialize.status, 200);
+  const initializeBody = await initialize.json();
+  assert.equal(initializeBody.result.protocolVersion, "2025-03-26");
+  assert.match(initialize.headers.get("access-control-allow-headers"), /mcp-protocol-version/);
+
+  const notification = await handleHttpRequest(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })
+  }));
+  assert.equal(notification.status, 202);
+  assert.equal(await notification.text(), "");
+});
+
 test("analyzes seeded capacity risk", async () => {
   resetState();
   const result = await callTool("analyze_capacity_risk", { limit: 3 });
