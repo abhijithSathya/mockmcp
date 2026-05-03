@@ -102,7 +102,7 @@ export async function handleHttpRequest(request, env = {}) {
     }
 
     if (request.method === "GET" && url.pathname === "/sse") {
-      return responseMcpSse(url);
+      return responseMcpSse(url, request);
     }
 
     if (request.method === "POST" && url.pathname === "/messages") {
@@ -1282,10 +1282,13 @@ function responseSse(events, status = 200) {
   });
 }
 
-function responseMcpSse(url) {
+function responseMcpSse(url, request) {
   const sessionId = `mock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const origin = `${url.protocol}//${url.host}`;
-  const messageEndpoint = `/messages?sessionId=${encodeURIComponent(sessionId)}`;
+  const proto = request.headers.get("x-forwarded-proto") || url.protocol.replace(/:$/, "") || "https";
+  const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || url.host;
+  const origin = `${proto}://${host}`;
+  const messagePath = `/messages?sessionId=${encodeURIComponent(sessionId)}`;
+  const messageEndpoint = `${origin}${messagePath}`;
 
   const stream = new ReadableStream({
     start(controller) {
@@ -1324,7 +1327,7 @@ function responseMcpSse(url) {
       "access-control-expose-headers": "mcp-session-id",
       "x-accel-buffering": "no",
       "mcp-session-id": sessionId,
-      "x-mcp-message-endpoint": `${origin}${messageEndpoint}`
+      "x-mcp-message-endpoint": messageEndpoint
     }
   });
 }
