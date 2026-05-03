@@ -72,6 +72,7 @@ test("negotiates StreamableHTTP protocol and accepts notifications", async () =>
 });
 
 test("supports classic MCP SSE endpoint and message channel", async () => {
+  await handleHttpRequest(new Request("http://localhost/mock/reset", { method: "POST" }));
   const sse = await handleHttpRequest(new Request("http://localhost/sse", {
     method: "GET",
     headers: { accept: "text/event-stream" }
@@ -104,6 +105,11 @@ test("supports classic MCP SSE endpoint and message channel", async () => {
   assert.match(messageEvent, /"id":"sse-1"/);
   assert.match(messageEvent, /"tools"/);
   await reader.cancel();
+
+  const eventsResponse = await handleHttpRequest(new Request("http://localhost/mock/mcp-events"));
+  const events = await eventsResponse.json();
+  assert.ok(events.events.some((event) => event.type === "sse.open"));
+  assert.ok(events.events.some((event) => event.type === "sse.message.received" && event.details.method === "tools/list"));
 });
 
 test("analyzes seeded capacity risk", async () => {

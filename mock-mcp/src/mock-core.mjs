@@ -14,6 +14,7 @@ const CATEGORIES = [
 const SKILLS = ["FIBER_L1", "FIBER_L2", "COPPER", "METERING", "SAFETY_CERTIFIED"];
 const VALID_BOOKING_STATUSES = ["open", "closed", "restricted"];
 const sseClients = new Map();
+const mcpEvents = [];
 
 class ToolError extends Error {
   constructor(code, message, details = {}) {
@@ -71,7 +72,7 @@ export async function handleHttpRequest(request, env = {}) {
     if (request.method === "GET" && url.pathname === "/") {
       return responseJson({
         service: SERVICE_NAME,
-        endpoints: ["GET /health", "GET /sse", "POST /messages", "GET /mcp", "POST /mcp", "GET /tools", "POST /tools/{toolName}", "GET /mock/state", "POST /mock/reset"]
+        endpoints: ["GET /health", "GET /sse", "POST /messages", "GET /mcp", "POST /mcp", "GET /tools", "POST /tools/{toolName}", "GET /mock/state", "GET /mock/mcp-events", "POST /mock/reset"]
       });
     }
 
@@ -83,7 +84,12 @@ export async function handleHttpRequest(request, env = {}) {
       return responseJson(getPublicState());
     }
 
+    if (request.method === "GET" && url.pathname === "/mock/mcp-events") {
+      return responseJson({ events: mcpEvents.slice(-100) });
+    }
+
     if (request.method === "POST" && url.pathname === "/mock/reset") {
+      mcpEvents.length = 0;
       return responseJson({ reset: true, state: resetState() });
     }
 
@@ -102,24 +108,50 @@ export async function handleHttpRequest(request, env = {}) {
     }
 
     if (request.method === "GET" && url.pathname === "/sse") {
+      recordMcpEvent("sse.open", {
+        accept: request.headers.get("accept"),
+        userAgent: request.headers.get("user-agent")
+      });
       return responseMcpSse(url, request);
     }
 
     if (request.method === "POST" && url.pathname === "/messages") {
       const sessionId = url.searchParams.get("sessionId");
       const client = sessionId ? sseClients.get(sessionId) : null;
+      const payload = await readJson(request);
+      recordMcpEvent("sse.message.received", {
+        sessionId,
+        foundSession: Boolean(client),
+        method: Array.isArray(payload) ? payload.map((item) => item?.method) : payload?.method,
+        id: Array.isArray(payload) ? payload.map((item) => item?.id) : payload?.id,
+        userAgent: request.headers.get("user-agent")
+      });
       if (!client) {
+        recordMcpEvent("sse.message.unknownSession", { sessionId });
         return responseJson({ error: "unknown_session", message: "Unknown or expired SSE session." }, 404);
       }
-      const result = await handleMcp(await readJson(request));
+      const result = await handleMcp(payload);
       if (result !== null) {
         sendSse(client.controller, "message", result);
+        recordMcpEvent("sse.message.sent", {
+          sessionId,
+          method: Array.isArray(payload) ? payload.map((item) => item?.method) : payload?.method,
+          id: Array.isArray(payload) ? payload.map((item) => item?.id) : payload?.id
+        });
+      } else {
+        recordMcpEvent("sse.notification.accepted", { sessionId, method: payload?.method });
       }
       return responseEmpty(202);
     }
 
     if (request.method === "POST" && url.pathname === "/mcp") {
-      const result = await handleMcp(await readJson(request));
+      const payload = await readJson(request);
+      recordMcpEvent("streamable.message.received", {
+        method: Array.isArray(payload) ? payload.map((item) => item?.method) : payload?.method,
+        id: Array.isArray(payload) ? payload.map((item) => item?.id) : payload?.id,
+        userAgent: request.headers.get("user-agent")
+      });
+      const result = await handleMcp(payload);
       if (result === null) return responseEmpty(202);
       return responseJson(result);
     }
@@ -1295,6 +1327,7 @@ function responseMcpSse(url, request) {
       const client = { controller, heartbeat: null, expiry: null };
       sseClients.set(sessionId, client);
       sendSse(controller, "endpoint", messageEndpoint);
+      recordMcpEvent("sse.endpoint.sent", { sessionId, messageEndpoint });
       client.heartbeat = setInterval(() => {
         try {
           controller.enqueue(new TextEncoder().encode(": heartbeat\n\n"));
@@ -1342,6 +1375,19 @@ function cleanupSseClient(sessionId) {
   if (client.heartbeat) clearInterval(client.heartbeat);
   if (client.expiry) clearTimeout(client.expiry);
   sseClients.delete(sessionId);
+  recordMcpEvent("sse.closed", { sessionId });
+}
+
+function recordMcpEvent(type, details = {}) {
+  mcpEvents.push({
+    sequence: mcpEvents.length + 1,
+    at: new Date().toISOString(),
+    type,
+    details
+  });
+  if (mcpEvents.length > 200) {
+    mcpEvents.splice(0, mcpEvents.length - 200);
+  }
 }
 
 function filterSchema(extra = {}) {
