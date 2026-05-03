@@ -1,0 +1,6 @@
+name = "capacity-risk-mock-mcp"
+main = "src/worker.mjs"
+compatibility_date = "2026-05-03"
+
+[observability]
+enabled = true

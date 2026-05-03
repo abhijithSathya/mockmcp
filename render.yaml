@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: capacity-risk-mock-mcp
+    runtime: node
+    plan: free
+    rootDir: mock-mcp
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production

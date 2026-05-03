@@ -1,0 +1,12 @@
+{
+  "name": "capacity-risk-mock-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mock MCP service for the Capacity Risk & Booking Control Center POC.",
+  "scripts": {
+    "dev": "node src/render-server.mjs",
+    "start": "node src/render-server.mjs",
+    "test": "node --test"
+  }
+}
