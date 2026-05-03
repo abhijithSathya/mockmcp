@@ -69,7 +69,7 @@ export async function handleHttpRequest(request, env = {}) {
     if (request.method === "GET" && url.pathname === "/") {
       return responseJson({
         service: SERVICE_NAME,
-        endpoints: ["GET /health", "POST /mcp", "GET /tools", "POST /tools/{toolName}", "GET /mock/state", "POST /mock/reset"]
+        endpoints: ["GET /health", "GET /mcp", "POST /mcp", "GET /tools", "POST /tools/{toolName}", "GET /mock/state", "POST /mock/reset"]
       });
     }
 
@@ -83,6 +83,20 @@ export async function handleHttpRequest(request, env = {}) {
 
     if (request.method === "POST" && url.pathname === "/mock/reset") {
       return responseJson({ reset: true, state: resetState() });
+    }
+
+    if (request.method === "GET" && url.pathname === "/mcp") {
+      return responseSse([
+        {
+          event: "endpoint",
+          data: {
+            jsonrpc: "2.0",
+            service: SERVICE_NAME,
+            version: SERVICE_VERSION,
+            endpoint: "/mcp"
+          }
+        }
+      ]);
     }
 
     if (request.method === "POST" && url.pathname === "/mcp") {
@@ -104,6 +118,27 @@ export async function handleHttpRequest(request, env = {}) {
 }
 
 async function handleMcp(payload) {
+  if (Array.isArray(payload)) {
+    const responses = [];
+    for (const request of payload) {
+      const response = await handleMcp(request);
+      if (response) responses.push(response);
+    }
+    return responses;
+  }
+
+  if (!payload || payload.jsonrpc !== "2.0") {
+    return {
+      jsonrpc: "2.0",
+      id: payload?.id ?? null,
+      error: { code: -32600, message: "Invalid JSON-RPC 2.0 request." }
+    };
+  }
+
+  if (payload.method === "notifications/initialized") {
+    return null;
+  }
+
   if (payload.method === "initialize") {
     return {
       jsonrpc: "2.0",
@@ -130,7 +165,8 @@ async function handleMcp(payload) {
       jsonrpc: "2.0",
       id: payload.id ?? null,
       result: {
-        content: [{ type: "json", json: result }]
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result
       }
     };
   }
@@ -1182,7 +1218,25 @@ function responseJson(payload, status = 200) {
       "content-type": "application/json; charset=utf-8",
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "authorization,content-type"
+      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id",
+      "access-control-expose-headers": "mcp-session-id"
+    }
+  });
+}
+
+function responseSse(events, status = 200) {
+  const body = events
+    .map((item) => `event: ${item.event}\ndata: ${JSON.stringify(item.data)}\n\n`)
+    .join("");
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+      "access-control-allow-headers": "authorization,content-type,accept,mcp-session-id",
+      "access-control-expose-headers": "mcp-session-id"
     }
   });
 }

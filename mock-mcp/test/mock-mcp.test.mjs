@@ -13,6 +13,31 @@ test("lists tools through MCP", async () => {
   assert.ok(body.result.tools.find((tool) => tool.name === "move_activities"));
 });
 
+test("supports StreamableHTTP MCP probes and text tool results", async () => {
+  const probe = await handleHttpRequest(new Request("http://localhost/mcp", {
+    method: "GET",
+    headers: { accept: "text/event-stream" }
+  }));
+  assert.equal(probe.status, 200);
+  assert.match(probe.headers.get("content-type"), /text\/event-stream/);
+  assert.match(await probe.text(), /endpoint/);
+
+  const response = await handleHttpRequest(new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: { accept: "application/json, text/event-stream" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "2",
+      method: "tools/call",
+      params: { name: "analyze_capacity_risk", arguments: { limit: 1 } }
+    })
+  }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.result.content[0].type, "text");
+  assert.ok(body.result.structuredContent.items[0].riskId.startsWith("RISK-"));
+});
+
 test("analyzes seeded capacity risk", async () => {
   resetState();
   const result = await callTool("analyze_capacity_risk", { limit: 3 });
