@@ -71,6 +71,41 @@ test("negotiates StreamableHTTP protocol and accepts notifications", async () =>
   assert.equal(await notification.text(), "");
 });
 
+test("supports classic MCP SSE endpoint and message channel", async () => {
+  const sse = await handleHttpRequest(new Request("http://localhost/sse", {
+    method: "GET",
+    headers: { accept: "text/event-stream" }
+  }));
+  assert.equal(sse.status, 200);
+  assert.match(sse.headers.get("content-type"), /text\/event-stream/);
+  const sessionId = sse.headers.get("mcp-session-id");
+  assert.ok(sessionId);
+
+  const reader = sse.body.getReader();
+  const first = await reader.read();
+  const endpointEvent = new TextDecoder().decode(first.value);
+  assert.match(endpointEvent, /event: endpoint/);
+  assert.match(endpointEvent, new RegExp(`/messages\\?sessionId=${sessionId}`));
+
+  const message = await handleHttpRequest(new Request(`http://localhost/messages?sessionId=${sessionId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "sse-1",
+      method: "tools/list"
+    })
+  }));
+  assert.equal(message.status, 202);
+
+  const second = await reader.read();
+  const messageEvent = new TextDecoder().decode(second.value);
+  assert.match(messageEvent, /event: message/);
+  assert.match(messageEvent, /"id":"sse-1"/);
+  assert.match(messageEvent, /"tools"/);
+  await reader.cancel();
+});
+
 test("analyzes seeded capacity risk", async () => {
   resetState();
   const result = await callTool("analyze_capacity_risk", { limit: 3 });

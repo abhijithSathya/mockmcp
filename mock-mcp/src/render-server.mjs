@@ -18,7 +18,15 @@ const server = http.createServer(async (incoming, outgoing) => {
       });
       const response = await handleHttpRequest(request, process.env);
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
-      outgoing.end(Buffer.from(await response.arrayBuffer()));
+      if (response.body) {
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          outgoing.write(Buffer.from(value));
+        }
+      }
+      outgoing.end();
     } catch (error) {
       outgoing.writeHead(500, { "content-type": "application/json" });
       outgoing.end(JSON.stringify({ error: "internal_error", message: error.message }));
