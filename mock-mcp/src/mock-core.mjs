@@ -3,6 +3,12 @@ const SERVICE_VERSION = "0.1.0";
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const BASE_NOW = "2026-05-03T10:30:00Z";
 const AREAS = ["NORTH", "SOUTH", "EAST", "WEST"];
+const AREA_GEOGRAPHY = {
+  NORTH: { country: "United States", region: "Northeast", district: "Boston District", workZone: "NORTH" },
+  SOUTH: { country: "United States", region: "Southeast", district: "Atlanta District", workZone: "SOUTH" },
+  EAST: { country: "United States", region: "Mid-Atlantic", district: "Newark District", workZone: "EAST" },
+  WEST: { country: "United States", region: "West", district: "Bay Area District", workZone: "WEST" }
+};
 const TIME_SLOTS = ["08:00-12:00", "12:00-18:00"];
 const CATEGORIES = [
   { code: "FIBER_INSTALL", name: "Fiber Install", activityTypes: ["INSTALL"], skills: ["FIBER_L1", "FIBER_L2"], timeSlots: TIME_SLOTS },
@@ -41,6 +47,9 @@ export function getPublicState() {
       activities: state.activities.length,
       communications: state.communications.length,
       recommendationStates: state.recommendationStates.length,
+      knownEvents: state.knownEvents.length,
+      workforceScenarios: state.workforceScenarios.length,
+      reviewPackages: state.reviewPackages.length,
       auditEvents: state.auditEvents.length
     },
     areas: AREAS,
@@ -52,6 +61,14 @@ export function getPublicState() {
 
 export async function handleHttpRequest(request, env = {}) {
   const url = new URL(request.url);
+  const acceptHeader = request.headers.get("accept") || "";
+
+  recordMcpEvent("http.request", {
+    method: request.method,
+    path: url.pathname,
+    accept: acceptHeader,
+    userAgent: request.headers.get("user-agent")
+  });
 
   if (request.method === "OPTIONS") {
     return responseJson({}, 204);
@@ -67,6 +84,15 @@ export async function handleHttpRequest(request, env = {}) {
   try {
     if (request.method === "GET" && url.pathname === "/health") {
       return responseJson({ ok: true, service: SERVICE_NAME, version: SERVICE_VERSION, generatedAt: BASE_NOW });
+    }
+
+    if (request.method === "GET" && url.pathname === "/" && acceptHeader.includes("text/event-stream")) {
+      recordMcpEvent("sse.open", {
+        path: url.pathname,
+        accept: acceptHeader,
+        userAgent: request.headers.get("user-agent")
+      });
+      return responseMcpSse(url, request);
     }
 
     if (request.method === "GET" && url.pathname === "/") {
@@ -107,8 +133,9 @@ export async function handleHttpRequest(request, env = {}) {
       ]);
     }
 
-    if (request.method === "GET" && url.pathname === "/sse") {
+    if (request.method === "GET" && ["/sse", "/sse/sse", "/mcp/sse"].includes(url.pathname)) {
       recordMcpEvent("sse.open", {
+        path: url.pathname,
         accept: request.headers.get("accept"),
         userAgent: request.headers.get("user-agent")
       });
@@ -406,6 +433,127 @@ const TOOL_METADATA = {
       },
       required: ["state"]
     }
+  },
+  get_forecast_summary: {
+    description: "Return high-level forecast workforce KPIs for the Forecast Command Center.",
+    inputSchema: filterSchema()
+  },
+  get_forecast_workload_series: {
+    description: "Return chart-ready actual, forecast, plan, booked workload, and capacity series.",
+    inputSchema: filterSchema({ granularity: { type: "string", enum: ["day", "week"] } })
+  },
+  get_forecast_geography_outlook: {
+    description: "Return map and geography outlook rows by country, region, district, work zone, or area.",
+    inputSchema: filterSchema({ geoLevel: { type: "string", enum: ["country", "region", "district", "workZone", "area"] }, includeSurplus: { type: "boolean" } })
+  },
+  get_capacity_outlook: {
+    description: "Return workforce capacity outlook by date, area, category, skill, and slot.",
+    inputSchema: filterSchema()
+  },
+  get_demand_pattern_detail: {
+    description: "Return drilldown data for a selected demand pattern or forecast recommendation.",
+    inputSchema: filterSchema({ patternId: { type: "string" }, recommendationId: { type: "string" } })
+  },
+  get_known_events: {
+    description: "List known events, recurrences, and forecast adjustment state.",
+    inputSchema: filterSchema({ eventIds: arrayOrString("Known event IDs."), status: arrayOrString("Event adjustment states.") })
+  },
+  get_workforce_scenario: {
+    description: "Return a saved workforce scenario and before/after metrics.",
+    inputSchema: { type: "object", properties: { scenarioId: { type: "string" } }, required: ["scenarioId"] }
+  },
+  get_workforce_review_packages: {
+    description: "List saved review packages and applied mock scenario state.",
+    inputSchema: filterSchema({ reviewPackageId: { type: "string" }, status: arrayOrString("Package statuses.") })
+  },
+  analyze_forecast_workforce_recommendations: {
+    description: "Return ranked forecast-driven workforce, event, booking, and investigation recommendations.",
+    inputSchema: filterSchema({ limit: { type: "number" }, includeHealthy: { type: "boolean" } })
+  },
+  detect_demand_patterns: {
+    description: "Detect forecast spikes, drops, forecast misses, recurring events, and data-quality patterns.",
+    inputSchema: filterSchema({ limit: { type: "number" }, sensitivity: { type: "string", enum: ["low", "medium", "high"] } })
+  },
+  explain_demand_pattern: {
+    description: "Explain one demand pattern and suggest likely business drivers.",
+    inputSchema: filterSchema({ patternId: { type: "string" } })
+  },
+  recommend_workforce_actions: {
+    description: "Recommend add, release, redeploy, contractor, overtime, and quota options.",
+    inputSchema: filterSchema({ recommendationId: { type: "string" }, patternId: { type: "string" } })
+  },
+  recommend_forecast_booking_controls: {
+    description: "Recommend quota and booking controls from forecast workforce context.",
+    inputSchema: filterSchema({ recommendationId: { type: "string" }, scenarioId: { type: "string" } })
+  },
+  simulate_workforce_scenario: {
+    description: "Calculate before/after forecast and capacity metrics for workforce and forecast-event actions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recommendationId: { type: "string" },
+        scenarioName: { type: "string" },
+        dateRange: { type: "object", properties: { start: { type: "string" }, end: { type: "string" } } },
+        areas: arrayOrString("Capacity areas."),
+        capacityCategories: arrayOrString("Category codes."),
+        skills: arrayOrString("Skill codes."),
+        timeSlots: arrayOrString("Time slots."),
+        scenarioActions: { type: "array", items: { type: "object" } },
+        save: { type: "boolean" }
+      }
+    }
+  },
+  compare_workforce_scenarios: {
+    description: "Compare multiple workforce scenario requests or saved scenario IDs.",
+    inputSchema: { type: "object", properties: { scenarioIds: arrayOrString("Scenario IDs."), scenarioRequests: { type: "array", items: { type: "object" } } } }
+  },
+  save_workforce_scenario: {
+    description: "Save a workforce scenario in mock state.",
+    inputSchema: { type: "object", properties: { scenario: { type: "object" } }, required: ["scenario"] }
+  },
+  create_known_event: {
+    description: "Create a known demand event and optional recurrence.",
+    inputSchema: knownEventSchema()
+  },
+  update_known_event: {
+    description: "Update a known demand event.",
+    inputSchema: { type: "object", properties: { eventId: { type: "string" }, changes: { type: "object" } }, required: ["eventId", "changes"] }
+  },
+  link_pattern_to_event: {
+    description: "Link a detected demand pattern to a known event.",
+    inputSchema: { type: "object", properties: { patternId: { type: "string" }, eventId: { type: "string" }, notes: { type: "string" } }, required: ["patternId", "eventId"] }
+  },
+  classify_demand_pattern: {
+    description: "Classify a pattern as event, data issue, seasonality, monitor, or rejected.",
+    inputSchema: { type: "object", properties: { patternId: { type: "string" }, classification: { type: "string" }, reason: { type: "string" } }, required: ["patternId", "classification"] }
+  },
+  apply_forecast_event_adjustment: {
+    description: "Apply a known event impact to mock forecast workload.",
+    inputSchema: { type: "object", properties: { eventId: { type: "string" }, impactPercent: { type: "number" }, reason: { type: "string" } }, required: ["eventId"] }
+  },
+  remove_forecast_event_adjustment: {
+    description: "Remove a known event impact from mock forecast workload.",
+    inputSchema: { type: "object", properties: { eventId: { type: "string" }, reason: { type: "string" } }, required: ["eventId"] }
+  },
+  create_workforce_review_package: {
+    description: "Create a review package from a workforce scenario or recommendation.",
+    inputSchema: { type: "object", properties: { scenarioId: { type: "string" }, recommendationId: { type: "string" }, owner: { type: "string" }, notes: { type: "string" } } }
+  },
+  update_workforce_review_package: {
+    description: "Mark a review package reviewed, approved, rejected, edited, or expired.",
+    inputSchema: { type: "object", properties: { reviewPackageId: { type: "string" }, status: { type: "string" }, changes: { type: "object" }, reason: { type: "string" } }, required: ["reviewPackageId"] }
+  },
+  apply_workforce_scenario: {
+    description: "Apply approved mock state changes from a scenario or review package.",
+    inputSchema: { type: "object", properties: { scenarioId: { type: "string" }, reviewPackageId: { type: "string" }, sendCommunication: { type: "boolean" }, reason: { type: "string" } } }
+  },
+  rollback_workforce_scenario: {
+    description: "Rollback a previously applied mock workforce scenario where supported.",
+    inputSchema: { type: "object", properties: { scenarioId: { type: "string" }, reviewPackageId: { type: "string" }, reason: { type: "string" } } }
+  },
+  generate_workforce_review_summary: {
+    description: "Generate a human-readable summary for manager review or communication.",
+    inputSchema: { type: "object", properties: { scenarioId: { type: "string" }, reviewPackageId: { type: "string" } } }
   }
 };
 
@@ -826,6 +974,431 @@ const TOOL_HANDLERS = {
     state.recommendationStates.push(record);
     audit("update_recommendation_state", args, record);
     return record;
+  },
+  get_forecast_summary: (args) => {
+    const cells = filterCells(args);
+    const patterns = demandPatterns(args);
+    const totals = summarizeCells(cells);
+    return {
+      generatedAt: BASE_NOW,
+      filters: normalizedFilterSummary(args),
+      horizon: horizonForCells(cells),
+      kpis: {
+        forecastExpectedMinutes: totals.forecastExpectedMinutes,
+        forecastMinMinutes: totals.forecastMinMinutes,
+        forecastMaxMinutes: totals.forecastMaxMinutes,
+        planWorkloadMinutes: totals.planWorkloadMinutes,
+        planVarianceMinutes: totals.planVarianceMinutes,
+        bookedWorkloadMinutes: totals.bookedWorkloadMinutes,
+        availableCapacityMinutes: totals.availableCapacityMinutes,
+        capacityGapMinutes: totals.capacityGapMinutes,
+        capacitySurplusMinutes: totals.capacitySurplusMinutes,
+        availableResourceCount: totals.availableResourceCount,
+        shortageAreaCount: new Set(cells.filter((cell) => cell.forecastedWorkloadMinutes > cell.availableCapacityMinutes).map((cell) => cell.area)).size,
+        surplusAreaCount: new Set(cells.filter((cell) => cell.availableCapacityMinutes > cell.forecastMaxWorkloadMinutes).map((cell) => cell.area)).size,
+        knownEventCount: filterKnownEvents(args).length,
+        openRecommendationCount: TOOL_HANDLERS.analyze_forecast_workforce_recommendations({ ...args, limit: 100 }).items.length,
+        detectedPatternCount: patterns.length
+      },
+      topRecommendations: TOOL_HANDLERS.analyze_forecast_workforce_recommendations({ ...args, limit: 5 }).items,
+      topPatterns: patterns.slice(0, 5)
+    };
+  },
+  get_forecast_workload_series: (args) => {
+    const cells = filterCells(args);
+    const byDate = groupCells(cells, (cell) => args.granularity === "week" ? weekKey(cell.date) : cell.date);
+    const items = [...byDate.entries()].map(([period, periodCells]) => {
+      const totals = summarizeCells(periodCells);
+      return {
+        period,
+        date: args.granularity === "week" ? undefined : period,
+        actualWorkloadMinutes: historicalActualForCells(periodCells),
+        bookedWorkloadMinutes: totals.bookedWorkloadMinutes,
+        forecastMinMinutes: totals.forecastMinMinutes,
+        forecastExpectedMinutes: totals.forecastExpectedMinutes,
+        forecastMaxMinutes: totals.forecastMaxMinutes,
+        planWorkloadMinutes: totals.planWorkloadMinutes,
+        availableCapacityMinutes: totals.availableCapacityMinutes,
+        capacityGapMinutes: totals.capacityGapMinutes,
+        knownEventIds: eventIdsForCells(periodCells)
+      };
+    }).sort((a, b) => a.period.localeCompare(b.period));
+    return { generatedAt: BASE_NOW, granularity: args.granularity || "day", items };
+  },
+  get_forecast_geography_outlook: (args) => {
+    const geoLevel = args.geoLevel || "region";
+    const groups = groupCells(filterCells(args), (cell) => geographyKey(cell.area, geoLevel));
+    const items = [...groups.entries()].map(([geoKey, cells]) => {
+      const totals = summarizeCells(cells);
+      const riskScoreValue = forecastRiskScore(totals);
+      const surplusScoreValue = forecastSurplusScore(totals);
+      return {
+        geographyLevel: geoLevel,
+        geographyKey: geoKey,
+        areas: [...new Set(cells.map((cell) => cell.area))],
+        mapState: riskScoreValue >= 40 ? "SHORTAGE" : surplusScoreValue >= 45 ? "SURPLUS" : "HEALTHY",
+        riskScore: riskScoreValue,
+        surplusScore: surplusScoreValue,
+        forecastExpectedMinutes: totals.forecastExpectedMinutes,
+        forecastMinMinutes: totals.forecastMinMinutes,
+        forecastMaxMinutes: totals.forecastMaxMinutes,
+        historicalBaselineMinutes: historicalActualForCells(cells),
+        bookedWorkloadMinutes: totals.bookedWorkloadMinutes,
+        availableCapacityMinutes: totals.availableCapacityMinutes,
+        availableResourceCount: totals.availableResourceCount,
+        skillGapMinutes: totals.skillGapMinutes,
+        capacityGapMinutes: totals.capacityGapMinutes,
+        capacitySurplusMinutes: totals.capacitySurplusMinutes,
+        utilization: ratio(totals.forecastExpectedMinutes, totals.availableCapacityMinutes),
+        planVarianceMinutes: totals.planVarianceMinutes,
+        knownEvents: filterKnownEvents({ ...args, areas: [...new Set(cells.map((cell) => cell.area))] }).map(eventSummary),
+        recommendedAction: geographyRecommendedAction(totals)
+      };
+    }).filter((item) => args.includeSurplus || item.mapState !== "SURPLUS" || item.surplusScore >= 45)
+      .sort((a, b) => Math.max(b.riskScore, b.surplusScore) - Math.max(a.riskScore, a.surplusScore));
+    return { generatedAt: BASE_NOW, geographyLevel: geoLevel, items };
+  },
+  get_capacity_outlook: (args) => ({
+    generatedAt: BASE_NOW,
+    items: filterCells(args).map((cell) => {
+      const totals = summarizeCells([cell]);
+      return {
+        date: cell.date,
+        area: cell.area,
+        geography: AREA_GEOGRAPHY[cell.area],
+        capacityCategory: cell.capacityCategory,
+        skill: cell.skill,
+        timeSlot: cell.timeSlot,
+        availableResourceCount: cell.availableResourceCount,
+        availableCapacityMinutes: cell.availableCapacityMinutes,
+        plannedCapacityMinutes: cell.calendarCapacityMinutes,
+        contractorCapacityMinutes: temporaryCapacity(cell, "CONTRACTOR"),
+        overtimeCapacityMinutes: temporaryCapacity(cell, "OVERTIME"),
+        borrowableCapacityMinutes: temporaryCapacity(cell, "BORROW"),
+        releaseCandidateMinutes: Math.max(0, cell.availableCapacityMinutes - cell.forecastMaxWorkloadMinutes),
+        capacityGapMinutes: totals.capacityGapMinutes,
+        skillGapMinutes: totals.skillGapMinutes,
+        utilization: ratio(cell.forecastedWorkloadMinutes, cell.availableCapacityMinutes)
+      };
+    })
+  }),
+  get_demand_pattern_detail: (args) => {
+    const pattern = args.patternId ? patternById(args.patternId) : selectPattern(args);
+    const filters = pattern.filters || args;
+    return {
+      generatedAt: BASE_NOW,
+      pattern,
+      series: TOOL_HANDLERS.get_forecast_workload_series({ ...filters, dateRange: pattern.contextDateRange || filters.dateRange }).items,
+      eventCandidates: filterKnownEvents(filters).map(eventSummary),
+      forecastAdjustmentPreview: previewEventAdjustment(pattern, filterKnownEvents(filters)[0]),
+      downstreamCapacityImpact: TOOL_HANDLERS.get_forecast_summary(filters).kpis,
+      suggestedActions: patternSuggestedActions(pattern)
+    };
+  },
+  get_known_events: (args) => ({
+    generatedAt: BASE_NOW,
+    items: filterKnownEvents(args)
+  }),
+  get_workforce_scenario: (args) => {
+    const scenario = state.workforceScenarios.find((item) => item.scenarioId === args.scenarioId);
+    if (!scenario) throw new ToolError("scenario_not_found", `No workforce scenario found for ${args.scenarioId}.`);
+    return { generatedAt: BASE_NOW, scenario };
+  },
+  get_workforce_review_packages: (args) => ({
+    generatedAt: BASE_NOW,
+    items: state.reviewPackages.filter((pkg) =>
+      (!args.reviewPackageId || pkg.reviewPackageId === args.reviewPackageId) &&
+      matchList(pkg.status, normalizeList(args.status)) &&
+      matchAny(pkg.areas || [], normalizeList(args.areas || args.area)) &&
+      matchAny(pkg.capacityCategories || [], normalizeList(args.capacityCategories || args.capacityCategory))
+    )
+  }),
+  analyze_forecast_workforce_recommendations: (args) => {
+    let items = forecastRecommendations(args);
+    if (!args.includeHealthy) items = items.filter((item) => item.severity !== "HEALTHY");
+    items.sort((a, b) => b.score - a.score || a.dateRange.start.localeCompare(b.dateRange.start));
+    const selected = items.slice(0, Number(args.limit || 20));
+    for (const item of selected) state.recommendationCache.set(item.recommendationId, item);
+    return { generatedAt: BASE_NOW, items: selected };
+  },
+  detect_demand_patterns: (args) => ({
+    generatedAt: BASE_NOW,
+    sensitivity: args.sensitivity || "medium",
+    items: demandPatterns(args).slice(0, Number(args.limit || 20))
+  }),
+  explain_demand_pattern: (args) => {
+    const pattern = args.patternId ? patternById(args.patternId) : selectPattern(args);
+    return {
+      generatedAt: BASE_NOW,
+      patternId: pattern.patternId,
+      patternType: pattern.patternType,
+      hypothesis: pattern.agentHypothesis,
+      confidence: pattern.confidence,
+      evidence: pattern.evidence,
+      likelyDrivers: pattern.likelyDrivers,
+      suggestedUserQuestion: patternQuestion(pattern),
+      recommendedNextActions: patternSuggestedActions(pattern)
+    };
+  },
+  recommend_workforce_actions: (args) => {
+    const recommendation = args.recommendationId ? forecastRecommendationById(args.recommendationId) : forecastRecommendations(args)[0];
+    if (!recommendation) throw new ToolError("recommendation_not_found", "No matching forecast workforce recommendation found.", args);
+    return {
+      generatedAt: BASE_NOW,
+      recommendationId: recommendation.recommendationId,
+      sourceType: recommendation.recommendationType,
+      actions: workforceActionOptions(recommendation),
+      preferredActionCode: workforceActionOptions(recommendation)[0]?.actionCode,
+      communicationDraft: {
+        subject: `${recommendation.area} ${recommendation.capacityCategory} workforce recommendation`,
+        message: `${recommendation.recommendedAction}. Expected impact: ${recommendation.expectedImpact.summary}`
+      }
+    };
+  },
+  recommend_forecast_booking_controls: (args) => {
+    const recommendation = args.recommendationId ? forecastRecommendationById(args.recommendationId) : null;
+    const scenario = args.scenarioId ? state.workforceScenarios.find((item) => item.scenarioId === args.scenarioId) : null;
+    const filters = recommendation ? recommendation.filters : scenario ? scenario.filters : args;
+    const cell = selectCell(filters);
+    const booking = TOOL_HANDLERS.recommend_booking_controls(cellToFilter(cell));
+    return {
+      ...booking,
+      generatedAt: BASE_NOW,
+      sourceRecommendationId: recommendation?.recommendationId,
+      sourceScenarioId: scenario?.scenarioId,
+      forecastContext: {
+        forecastExpectedMinutes: cell.forecastedWorkloadMinutes,
+        forecastMaxMinutes: cell.forecastMaxWorkloadMinutes,
+        availableCapacityMinutes: cell.availableCapacityMinutes,
+        residualGapAfterScenarioMinutes: scenario?.afterMetrics?.capacityGapMinutes ?? Math.max(0, cell.forecastedWorkloadMinutes - cell.availableCapacityMinutes)
+      }
+    };
+  },
+  simulate_workforce_scenario: (args) => {
+    const recommendation = args.recommendationId ? forecastRecommendationById(args.recommendationId) : null;
+    const filters = recommendation ? recommendation.filters : args;
+    const scenarioActions = args.scenarioActions?.length ? args.scenarioActions : workforceActionOptions(recommendation || forecastRecommendations(filters)[0] || {}).slice(0, 1);
+    const scenario = buildScenario({
+      scenarioName: args.scenarioName || recommendation?.title || "Forecast workforce scenario",
+      sourceRecommendationId: recommendation?.recommendationId,
+      filters,
+      scenarioActions
+    });
+    if (args.save) state.workforceScenarios.push(scenario);
+    audit("simulate_workforce_scenario", args, { scenarioId: scenario.scenarioId, saved: Boolean(args.save), recommendedDecision: scenario.recommendedDecision });
+    return { generatedAt: BASE_NOW, scenario };
+  },
+  compare_workforce_scenarios: (args) => {
+    const saved = normalizeList(args.scenarioIds)?.map((scenarioId) => {
+      const scenario = state.workforceScenarios.find((item) => item.scenarioId === scenarioId);
+      if (!scenario) throw new ToolError("scenario_not_found", `No workforce scenario found for ${scenarioId}.`);
+      return scenario;
+    }) || [];
+    const simulated = (args.scenarioRequests || []).map((request) => TOOL_HANDLERS.simulate_workforce_scenario({ ...request, save: false }).scenario);
+    const items = [...saved, ...simulated].map((scenario) => ({
+      scenarioId: scenario.scenarioId,
+      scenarioName: scenario.scenarioName,
+      actionSummary: scenario.scenarioActions.map(actionLabel).join("; "),
+      capacityGapAfterMinutes: scenario.afterMetrics.capacityGapMinutes,
+      surplusAfterMinutes: scenario.afterMetrics.capacitySurplusMinutes,
+      utilizationAfter: scenario.afterMetrics.utilization,
+      residualRisk: scenario.residualRisk,
+      recommendedDecision: scenario.recommendedDecision,
+      score: scenarioComparisonScore(scenario)
+    })).sort((a, b) => b.score - a.score);
+    return { generatedAt: BASE_NOW, items };
+  },
+  save_workforce_scenario: (args) => {
+    const scenario = {
+      ...args.scenario,
+      scenarioId: args.scenario.scenarioId || `SCN-${String(state.workforceScenarios.length + 1).padStart(5, "0")}`,
+      savedAt: BASE_NOW
+    };
+    state.workforceScenarios.push(scenario);
+    audit("save_workforce_scenario", args, scenario);
+    return { generatedAt: BASE_NOW, scenario };
+  },
+  create_known_event: (args) => {
+    const event = normalizeKnownEvent(args, `EVT-${String(state.knownEvents.length + 1).padStart(5, "0")}`);
+    state.knownEvents.push(event);
+    audit("create_known_event", args, event);
+    return { generatedAt: BASE_NOW, event };
+  },
+  update_known_event: (args) => {
+    const event = findKnownEvent(args.eventId);
+    Object.assign(event, normalizeKnownEvent({ ...event, ...args.changes }, event.eventId), { updatedAt: BASE_NOW });
+    audit("update_known_event", args, event);
+    return { generatedAt: BASE_NOW, event };
+  },
+  link_pattern_to_event: (args) => {
+    const event = findKnownEvent(args.eventId);
+    const pattern = patternById(args.patternId);
+    const link = {
+      linkId: `LINK-${String(state.patternLinks.length + 1).padStart(5, "0")}`,
+      linkedAt: BASE_NOW,
+      patternId: args.patternId,
+      eventId: args.eventId,
+      notes: args.notes || `Pattern linked to ${event.eventName}`
+    };
+    state.patternLinks.push(link);
+    audit("link_pattern_to_event", args, link);
+    return { generatedAt: BASE_NOW, link, pattern, event };
+  },
+  classify_demand_pattern: (args) => {
+    const pattern = patternById(args.patternId);
+    const classification = {
+      classificationId: `PATCLS-${String(state.patternClassifications.length + 1).padStart(5, "0")}`,
+      classifiedAt: BASE_NOW,
+      patternId: args.patternId,
+      classification: args.classification,
+      reason: args.reason || ""
+    };
+    state.patternClassifications.push(classification);
+    audit("classify_demand_pattern", args, classification);
+    return { generatedAt: BASE_NOW, pattern, classification };
+  },
+  apply_forecast_event_adjustment: (args) => {
+    const event = findKnownEvent(args.eventId);
+    if (event.forecastAdjustmentState === "applied") {
+      return { generatedAt: BASE_NOW, event, adjustedCount: 0, message: "Event adjustment already applied." };
+    }
+    const impactPercent = Number(args.impactPercent ?? event.impactPercent ?? 0);
+    const cells = filterCells({
+      dateRange: { start: event.startDate, end: event.endDate },
+      areas: event.areas,
+      capacityCategories: event.capacityCategories,
+      activityTypes: event.activityTypes,
+      skills: event.skills
+    });
+    const adjustment = {
+      adjustmentId: `ADJ-${String(state.eventAdjustments.length + 1).padStart(5, "0")}`,
+      eventId: event.eventId,
+      appliedAt: BASE_NOW,
+      impactPercent,
+      cells: cells.map((cell) => ({ riskId: riskIdForCell(cell), before: cell.forecastedWorkloadMinutes }))
+    };
+    for (const cell of cells) {
+      cell.forecastedWorkloadMinutes = Math.max(0, Math.round(cell.forecastedWorkloadMinutes * (1 + impactPercent / 100)));
+      cell.forecastMinWorkloadMinutes = Math.max(0, Math.round(cell.forecastMinWorkloadMinutes * (1 + impactPercent / 100)));
+      cell.forecastMaxWorkloadMinutes = Math.max(0, Math.round(cell.forecastMaxWorkloadMinutes * (1 + impactPercent / 100)));
+      cell.planVarianceMinutes = cell.forecastedWorkloadMinutes - cell.planWorkloadMinutes;
+      cell.eventImpactId = event.eventId;
+    }
+    event.forecastAdjustmentState = "applied";
+    state.eventAdjustments.push(adjustment);
+    audit("apply_forecast_event_adjustment", args, { eventId: event.eventId, adjustedCount: cells.length, impactPercent });
+    return { generatedAt: BASE_NOW, event, adjustmentId: adjustment.adjustmentId, adjustedCount: cells.length, impactPercent, adjustedRows: cells.map(toHeatmapCell) };
+  },
+  remove_forecast_event_adjustment: (args) => {
+    const event = findKnownEvent(args.eventId);
+    const adjustment = [...state.eventAdjustments].reverse().find((item) => item.eventId === event.eventId && !item.removedAt);
+    if (!adjustment) return { generatedAt: BASE_NOW, event, restoredCount: 0, message: "No active adjustment found." };
+    let restoredCount = 0;
+    for (const row of adjustment.cells) {
+      const cell = state.cells.find((candidate) => riskIdForCell(candidate) === row.riskId);
+      if (!cell) continue;
+      cell.forecastedWorkloadMinutes = row.before;
+      cell.forecastMinWorkloadMinutes = Math.max(0, row.before - 420);
+      cell.forecastMaxWorkloadMinutes = row.before + 420;
+      cell.planVarianceMinutes = cell.forecastedWorkloadMinutes - cell.planWorkloadMinutes;
+      if (cell.eventImpactId === event.eventId) delete cell.eventImpactId;
+      restoredCount += 1;
+    }
+    adjustment.removedAt = BASE_NOW;
+    event.forecastAdjustmentState = "proposed";
+    audit("remove_forecast_event_adjustment", args, { eventId: event.eventId, restoredCount });
+    return { generatedAt: BASE_NOW, event, restoredCount };
+  },
+  create_workforce_review_package: (args) => {
+    const scenario = args.scenarioId
+      ? state.workforceScenarios.find((item) => item.scenarioId === args.scenarioId)
+      : TOOL_HANDLERS.simulate_workforce_scenario({ recommendationId: args.recommendationId, save: true }).scenario;
+    if (!scenario) throw new ToolError("scenario_not_found", "No scenario found or generated for review package.", args);
+    const reviewPackage = {
+      reviewPackageId: `WRP-${String(state.reviewPackages.length + 1).padStart(5, "0")}`,
+      createdAt: BASE_NOW,
+      scenarioId: scenario.scenarioId,
+      sourceRecommendationId: scenario.sourceRecommendationId,
+      owner: args.owner || "Operations Manager",
+      status: "draft",
+      notes: args.notes || "",
+      areas: normalizeList(scenario.filters.areas || scenario.filters.area) || [],
+      capacityCategories: normalizeList(scenario.filters.capacityCategories || scenario.filters.capacityCategory) || [],
+      beforeMetrics: scenario.beforeMetrics,
+      afterMetrics: scenario.afterMetrics,
+      recommendedDecision: scenario.recommendedDecision,
+      summary: reviewSummaryForScenario(scenario)
+    };
+    state.reviewPackages.push(reviewPackage);
+    audit("create_workforce_review_package", args, reviewPackage);
+    return { generatedAt: BASE_NOW, reviewPackage };
+  },
+  update_workforce_review_package: (args) => {
+    const reviewPackage = findReviewPackage(args.reviewPackageId);
+    Object.assign(reviewPackage, args.changes || {}, {
+      status: args.status || args.changes?.status || reviewPackage.status,
+      updatedAt: BASE_NOW,
+      lastReason: args.reason || reviewPackage.lastReason
+    });
+    audit("update_workforce_review_package", args, reviewPackage);
+    return { generatedAt: BASE_NOW, reviewPackage };
+  },
+  apply_workforce_scenario: (args) => {
+    const scenario = scenarioFromArgs(args);
+    const before = filterCells(scenario.filters).map((cell) => ({ riskId: riskIdForCell(cell), availableCapacityMinutes: cell.availableCapacityMinutes }));
+    const capacityDelta = scenarioCapacityDelta(scenario);
+    const cells = filterCells(scenario.filters);
+    for (const cell of cells) {
+      cell.availableCapacityMinutes = Math.max(0, cell.availableCapacityMinutes + capacityDelta);
+      cell.availableResourceCount = Math.max(0, Math.round(cell.availableCapacityMinutes / 330));
+    }
+    scenario.status = "applied";
+    scenario.appliedAt = BASE_NOW;
+    scenario.rollbackSnapshot = before;
+    const reviewPackage = args.reviewPackageId ? findReviewPackage(args.reviewPackageId) : null;
+    if (reviewPackage) reviewPackage.status = "applied";
+    const communication = args.sendCommunication
+      ? TOOL_HANDLERS.send_communication({
+        audience: ["Operations Manager", "Capacity Planning"],
+        communicationType: "WORKFORCE_SCENARIO_APPLIED",
+        subject: `${scenario.scenarioName} applied`,
+        message: reviewSummaryForScenario(scenario),
+        actionIds: [scenario.scenarioId, reviewPackage?.reviewPackageId].filter(Boolean)
+      })
+      : null;
+    audit("apply_workforce_scenario", args, { scenarioId: scenario.scenarioId, updatedCellCount: cells.length, capacityDelta });
+    return { generatedAt: BASE_NOW, scenario, updatedCellCount: cells.length, capacityDeltaMinutesPerCell: capacityDelta, communication };
+  },
+  rollback_workforce_scenario: (args) => {
+    const scenario = scenarioFromArgs(args);
+    if (!scenario.rollbackSnapshot) {
+      return { generatedAt: BASE_NOW, scenario, restoredCount: 0, message: "Scenario has no rollback snapshot." };
+    }
+    let restoredCount = 0;
+    for (const snapshot of scenario.rollbackSnapshot) {
+      const cell = state.cells.find((candidate) => riskIdForCell(candidate) === snapshot.riskId);
+      if (!cell) continue;
+      cell.availableCapacityMinutes = snapshot.availableCapacityMinutes;
+      cell.availableResourceCount = Math.max(0, Math.round(cell.availableCapacityMinutes / 330));
+      restoredCount += 1;
+    }
+    scenario.status = "rolled_back";
+    scenario.rolledBackAt = BASE_NOW;
+    audit("rollback_workforce_scenario", args, { scenarioId: scenario.scenarioId, restoredCount });
+    return { generatedAt: BASE_NOW, scenario, restoredCount };
+  },
+  generate_workforce_review_summary: (args) => {
+    const scenario = scenarioFromArgs(args);
+    const reviewPackage = args.reviewPackageId ? findReviewPackage(args.reviewPackageId) : null;
+    return {
+      generatedAt: BASE_NOW,
+      scenarioId: scenario.scenarioId,
+      reviewPackageId: reviewPackage?.reviewPackageId,
+      summary: reviewSummaryForScenario(scenario),
+      beforeMetrics: scenario.beforeMetrics,
+      afterMetrics: scenario.afterMetrics,
+      recommendedDecision: scenario.recommendedDecision
+    };
   }
 };
 
@@ -954,7 +1527,55 @@ function createSeedState() {
   }
 
   const activities = createActivities(cells);
-  return { cells, activities, communications: [], recommendationStates: [], auditEvents: [] };
+  return {
+    cells,
+    activities,
+    knownEvents: createKnownEvents(),
+    workforceScenarios: [],
+    reviewPackages: [],
+    patternLinks: [],
+    patternClassifications: [],
+    eventAdjustments: [],
+    recommendationCache: new Map(),
+    communications: [],
+    recommendationStates: [],
+    auditEvents: []
+  };
+}
+
+function createKnownEvents() {
+  return [
+    normalizeKnownEvent({
+      eventName: "Summer fiber upgrade campaign",
+      eventType: "campaign",
+      startDate: "2026-05-14",
+      endDate: "2026-05-21",
+      areas: ["NORTH"],
+      capacityCategories: ["FIBER_INSTALL"],
+      activityTypes: ["INSTALL"],
+      skills: ["FIBER_L2"],
+      impactDirection: "increase_workload",
+      impactPercent: 18,
+      recurrence: "yearly",
+      notes: "Seed event explaining sustained Fiber Install demand.",
+      forecastAdjustmentState: "proposed"
+    }, "EVT-00001"),
+    normalizeKnownEvent({
+      eventName: "Regional appliance service sale",
+      eventType: "sale",
+      startDate: "2026-05-16",
+      endDate: "2026-05-23",
+      areas: ["SOUTH", "EAST"],
+      capacityCategories: ["REPAIR"],
+      activityTypes: ["REPAIR"],
+      skills: ["COPPER"],
+      impactDirection: "increase_workload",
+      impactPercent: 35,
+      recurrence: "monthly",
+      notes: "Seed event used by Demand Pattern Investigator.",
+      forecastAdjustmentState: "proposed"
+    }, "EVT-00002")
+  ];
 }
 
 function createActivities(cells) {
@@ -1261,6 +1882,455 @@ function audit(toolName, input, result) {
   });
 }
 
+function summarizeCells(cells) {
+  const forecastExpectedMinutes = sum(cells, "forecastedWorkloadMinutes");
+  const forecastMinMinutes = sum(cells, "forecastMinWorkloadMinutes");
+  const forecastMaxMinutes = sum(cells, "forecastMaxWorkloadMinutes");
+  const planWorkloadMinutes = sum(cells, "planWorkloadMinutes");
+  const bookedWorkloadMinutes = sum(cells, "bookedWorkloadMinutes");
+  const availableCapacityMinutes = sum(cells, "availableCapacityMinutes");
+  const availableResourceCount = sum(cells, "availableResourceCount");
+  return {
+    forecastExpectedMinutes,
+    forecastMinMinutes,
+    forecastMaxMinutes,
+    planWorkloadMinutes,
+    planVarianceMinutes: forecastExpectedMinutes - planWorkloadMinutes,
+    bookedWorkloadMinutes,
+    availableCapacityMinutes,
+    availableResourceCount,
+    capacityGapMinutes: Math.max(0, forecastExpectedMinutes - availableCapacityMinutes),
+    capacitySurplusMinutes: Math.max(0, availableCapacityMinutes - forecastMaxMinutes),
+    skillGapMinutes: sum(cells.map((cell) => ({ gap: Math.max(0, cell.forecastedWorkloadMinutes - cell.availableCapacityMinutes) })), "gap"),
+    utilization: ratio(forecastExpectedMinutes, availableCapacityMinutes)
+  };
+}
+
+function horizonForCells(cells) {
+  const dates = cells.map((cell) => cell.date).sort();
+  return dates.length ? { start: dates[0], end: dates[dates.length - 1] } : null;
+}
+
+function normalizedFilterSummary(args = {}) {
+  return {
+    dates: normalizeList(expandDateRange(args).dates || args.date),
+    areas: normalizeList(args.areas || args.area),
+    capacityCategories: normalizeList(args.capacityCategories || args.capacityCategory),
+    skills: normalizeList(args.skills || args.skill),
+    timeSlots: normalizeList(args.timeSlots || args.timeSlot)
+  };
+}
+
+function groupCells(cells, keyFn) {
+  const groups = new Map();
+  for (const cell of cells) {
+    const key = keyFn(cell);
+    groups.set(key, [...(groups.get(key) || []), cell]);
+  }
+  return groups;
+}
+
+function weekKey(date) {
+  const cursor = new Date(`${date}T00:00:00Z`);
+  const day = cursor.getUTCDay() || 7;
+  cursor.setUTCDate(cursor.getUTCDate() - day + 1);
+  return cursor.toISOString().slice(0, 10);
+}
+
+function historicalActualForCells(cells) {
+  return cells.reduce((total, cell) => total + historicalActualForCell(cell), 0);
+}
+
+function historicalActualForCell(cell) {
+  const seasonal = cell.area === "SOUTH" && cell.capacityCategory === "REPAIR" ? 1.08 : 0.94;
+  const patternLift = cell.date === "2026-05-16" && cell.area === "SOUTH" && cell.capacityCategory === "REPAIR" ? 1.28 : 1;
+  return Math.round(cell.planWorkloadMinutes * seasonal * patternLift);
+}
+
+function eventIdsForCells(cells) {
+  const areas = [...new Set(cells.map((cell) => cell.area))];
+  const categories = [...new Set(cells.map((cell) => cell.capacityCategory))];
+  const dates = cells.map((cell) => cell.date).sort();
+  return filterKnownEvents({
+    dateRange: { start: dates[0], end: dates[dates.length - 1] },
+    areas,
+    capacityCategories: categories
+  }).map((event) => event.eventId);
+}
+
+function geographyKey(area, geoLevel) {
+  if (geoLevel === "area") return area;
+  return AREA_GEOGRAPHY[area]?.[geoLevel] || area;
+}
+
+function forecastRiskScore(totals) {
+  const gapRatio = totals.capacityGapMinutes / Math.max(1, totals.forecastExpectedMinutes);
+  const planVarianceRatio = Math.max(0, totals.planVarianceMinutes) / Math.max(1, totals.planWorkloadMinutes);
+  return Math.min(100, Math.round((gapRatio * 65 + planVarianceRatio * 25 + ratio(totals.bookedWorkloadMinutes, totals.availableCapacityMinutes) * 10) * 2.2));
+}
+
+function forecastSurplusScore(totals) {
+  const surplusRatio = totals.capacitySurplusMinutes / Math.max(1, totals.availableCapacityMinutes);
+  const lowBookedRatio = Math.max(0, 1 - ratio(totals.bookedWorkloadMinutes, totals.availableCapacityMinutes));
+  return Math.min(100, Math.round((surplusRatio * 70 + lowBookedRatio * 20) * 1.7));
+}
+
+function geographyRecommendedAction(totals) {
+  if (totals.capacityGapMinutes > 0) return "Simulate add capacity, overtime, contractor coverage, or quota controls";
+  if (totals.capacitySurplusMinutes > 0) return "Simulate redeploy or release temporary capacity";
+  return "Monitor forecast and known events";
+}
+
+function temporaryCapacity(cell, type) {
+  if (type === "CONTRACTOR") return cell.capacityCategory === "FIBER_INSTALL" || cell.capacityCategory === "REPAIR" ? 660 : 330;
+  if (type === "OVERTIME") return Math.max(240, cell.availableResourceCount * 45);
+  if (type === "BORROW") return cell.area === "EAST" || cell.area === "WEST" ? 480 : 300;
+  return 0;
+}
+
+function forecastRecommendations(args = {}) {
+  const cells = filterCells(args);
+  const recommendations = [];
+  const groups = groupCells(cells, (cell) => [cell.area, cell.capacityCategory, cell.skill].join("|"));
+  for (const [key, group] of groups.entries()) {
+    const [area, capacityCategory, skill] = key.split("|");
+    const totals = summarizeCells(group);
+    const dates = group.map((cell) => cell.date).sort();
+    const filters = {
+      dateRange: { start: dates[0], end: dates[dates.length - 1] },
+      areas: [area],
+      capacityCategories: [capacityCategory],
+      skills: [skill]
+    };
+    if (totals.capacityGapMinutes > 900) {
+      const score = forecastRiskScore(totals);
+      recommendations.push({
+        recommendationId: `FWA-SHORT-${hashId(key + dates[0])}`,
+        recommendationType: "ADD_CAPACITY",
+        title: `${area} ${capacityCategory} needs additional ${skill} capacity`,
+        severity: riskLevelForScore(score),
+        score,
+        confidence: Number(Math.min(0.94, 0.7 + score / 400).toFixed(2)),
+        dateRange: filters.dateRange,
+        area,
+        capacityCategory,
+        requiredSkill: skill,
+        filters,
+        forecastExpectedMinutes: totals.forecastExpectedMinutes,
+        forecastMinMinutes: totals.forecastMinMinutes,
+        forecastMaxMinutes: totals.forecastMaxMinutes,
+        planVarianceMinutes: totals.planVarianceMinutes,
+        historicalBaselineMinutes: historicalActualForCells(group),
+        bookedWorkloadMinutes: totals.bookedWorkloadMinutes,
+        availableResourceCount: totals.availableResourceCount,
+        availableCapacityMinutes: totals.availableCapacityMinutes,
+        capacityGapOrSurplusMinutes: totals.capacityGapMinutes,
+        rootCause: totals.planVarianceMinutes > 0 ? "Forecast is above plan and exceeds available skilled capacity" : "Available skilled capacity is below expected workload",
+        recommendedAction: "Simulate contractor coverage, overtime, borrowing resources, or quota controls",
+        expectedImpact: {
+          summary: `Close up to ${totals.capacityGapMinutes} capacity minutes over ${dates.length} days`,
+          capacityGapBeforeMinutes: totals.capacityGapMinutes,
+          capacityGapAfterMinutes: Math.max(0, totals.capacityGapMinutes - 1320)
+        },
+        nextBestAction: "Simulate recommendation"
+      });
+    } else if (totals.capacitySurplusMinutes > 1200) {
+      const score = forecastSurplusScore(totals);
+      recommendations.push({
+        recommendationId: `FWA-SURPLUS-${hashId(key + dates[0])}`,
+        recommendationType: "REDEPLOY_OR_RELEASE",
+        title: `${area} ${capacityCategory} has sustained surplus ${skill} capacity`,
+        severity: score >= 60 ? "OPPORTUNITY" : "WATCH",
+        score,
+        confidence: 0.76,
+        dateRange: filters.dateRange,
+        area,
+        capacityCategory,
+        requiredSkill: skill,
+        filters,
+        forecastExpectedMinutes: totals.forecastExpectedMinutes,
+        forecastMinMinutes: totals.forecastMinMinutes,
+        forecastMaxMinutes: totals.forecastMaxMinutes,
+        planVarianceMinutes: totals.planVarianceMinutes,
+        historicalBaselineMinutes: historicalActualForCells(group),
+        bookedWorkloadMinutes: totals.bookedWorkloadMinutes,
+        availableResourceCount: totals.availableResourceCount,
+        availableCapacityMinutes: totals.availableCapacityMinutes,
+        capacityGapOrSurplusMinutes: totals.capacitySurplusMinutes,
+        rootCause: "Forecast max remains below available capacity across the selected horizon",
+        recommendedAction: "Simulate redeploying resources, releasing temporary capacity, or reopening booking",
+        expectedImpact: {
+          summary: `Redeploy or release up to ${Math.round(totals.capacitySurplusMinutes / 330)} resource-days`,
+          surplusBeforeMinutes: totals.capacitySurplusMinutes,
+          surplusAfterMinutes: Math.max(0, totals.capacitySurplusMinutes - 990)
+        },
+        nextBestAction: "Compare redeploy and release options"
+      });
+    }
+  }
+  for (const pattern of demandPatterns(args).slice(0, 4)) {
+    recommendations.push({
+      recommendationId: `FWA-PATTERN-${hashId(pattern.patternId)}`,
+      recommendationType: "INVESTIGATE_PATTERN",
+      title: pattern.title,
+      severity: pattern.score >= 75 ? "AT_RISK" : "WATCH",
+      score: pattern.score,
+      confidence: pattern.confidence,
+      dateRange: pattern.dateRange,
+      area: pattern.area,
+      capacityCategory: pattern.capacityCategory,
+      requiredSkill: pattern.skill,
+      filters: pattern.filters,
+      rootCause: pattern.agentHypothesis,
+      recommendedAction: "Ask user to confirm event, recurrence, or data issue",
+      expectedImpact: { summary: "Improves downstream workforce recommendation quality" },
+      nextBestAction: "Investigate pattern"
+    });
+  }
+  return recommendations;
+}
+
+function forecastRecommendationById(recommendationId) {
+  const recommendation = state.recommendationCache.get(recommendationId) || forecastRecommendations({ includeHealthy: true }).find((item) => item.recommendationId === recommendationId);
+  if (!recommendation) throw new ToolError("recommendation_not_found", `No forecast workforce recommendation found for ${recommendationId}.`);
+  return recommendation;
+}
+
+function demandPatterns(args = {}) {
+  const cells = filterCells(args);
+  const patterns = cells
+    .map((cell) => {
+      const actual = historicalActualForCell(cell);
+      const deviation = cell.forecastedWorkloadMinutes - actual;
+      const deviationRatio = deviation / Math.max(1, actual);
+      const planRatio = Math.max(0, cell.planVarianceMinutes) / Math.max(1, cell.planWorkloadMinutes);
+      const uncertaintyRatio = (cell.forecastMaxWorkloadMinutes - cell.forecastMinWorkloadMinutes) / Math.max(1, cell.forecastedWorkloadMinutes);
+      const score = Math.min(100, Math.round((Math.abs(deviationRatio) * 45 + planRatio * 30 + uncertaintyRatio * 15) * 2.2));
+      if (score < 35) return null;
+      const patternType = deviationRatio > 0.2 ? "SPIKE" : deviationRatio < -0.18 ? "DROP" : planRatio > 0.2 ? "PLAN_MISS" : "WIDE_FORECAST_RANGE";
+      const patternId = `PAT-${cell.date}-${cell.area}-${cell.capacityCategory}-${cell.timeSlot.replace(/[:]/g, "").replace("-", "")}`;
+      const linked = state.patternLinks.find((link) => link.patternId === patternId);
+      const classified = state.patternClassifications.find((item) => item.patternId === patternId);
+      return {
+        patternId,
+        title: `${cell.area} ${cell.capacityCategory} ${patternType.toLowerCase().replace("_", " ")}`,
+        patternType,
+        score,
+        dateRange: { start: cell.date, end: cell.date },
+        contextDateRange: { start: addDays(cell.date, -3), end: addDays(cell.date, 6) },
+        area: cell.area,
+        capacityCategory: cell.capacityCategory,
+        activityType: cell.activityType,
+        skill: cell.skill,
+        filters: cellToFilter(cell),
+        actualWorkloadMinutes: actual,
+        forecastExpectedMinutes: cell.forecastedWorkloadMinutes,
+        historicalBaselineMinutes: Math.round(cell.planWorkloadMinutes * 0.96),
+        forecastErrorMinutes: deviation,
+        planVarianceMinutes: cell.planVarianceMinutes,
+        bookedWorkloadMinutes: cell.bookedWorkloadMinutes,
+        existingEventMatch: linked?.eventId || filterKnownEvents(cellToFilter(cell))[0]?.eventId,
+        userConfirmationState: classified?.classification || (linked ? "confirmed_event" : "unreviewed"),
+        futureRecurrenceImpact: filterKnownEvents(cellToFilter(cell))[0]?.recurrence || "unknown",
+        agentHypothesis: patternHypothesis(patternType, cell),
+        likelyDrivers: likelyDriversForPattern(patternType, cell),
+        evidence: {
+          deviationPercent: Math.round(deviationRatio * 100),
+          forecastRangeMinutes: cell.forecastMaxWorkloadMinutes - cell.forecastMinWorkloadMinutes,
+          planVarianceMinutes: cell.planVarianceMinutes
+        },
+        confidence: Number(Math.min(0.9, 0.55 + score / 300).toFixed(2))
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  return patterns;
+}
+
+function patternById(patternId) {
+  const pattern = demandPatterns({ includeHealthy: true }).find((item) => item.patternId === patternId);
+  if (!pattern) throw new ToolError("pattern_not_found", `No demand pattern found for ${patternId}.`);
+  return pattern;
+}
+
+function selectPattern(args = {}) {
+  const pattern = demandPatterns(args)[0];
+  if (!pattern) throw new ToolError("pattern_not_found", "No matching demand pattern found.", args);
+  return pattern;
+}
+
+function patternHypothesis(patternType, cell) {
+  if (patternType === "SPIKE") return `Workload is materially above historical baseline for ${cell.area} ${cell.capacityCategory}; check for sale, campaign, outage, or weather impact.`;
+  if (patternType === "DROP") return `Workload is below historical baseline; check whether demand shifted, bookings closed early, or data is incomplete.`;
+  if (patternType === "PLAN_MISS") return "Forecast is above plan; review plan assumptions and known events.";
+  return "Forecast range widened; confirm whether uncertainty comes from event timing or volatile booking behavior.";
+}
+
+function likelyDriversForPattern(patternType, cell) {
+  const event = filterKnownEvents(cellToFilter(cell))[0];
+  return [
+    event ? `Possible known event: ${event.eventName}` : "No matching known event recorded",
+    patternType === "SPIKE" ? "Demand event or campaign" : "Booking policy or demand shift",
+    cell.planVarianceMinutes > 0 ? "Plan variance" : "Historical deviation"
+  ];
+}
+
+function patternQuestion(pattern) {
+  return `Workload for ${pattern.area} ${pattern.capacityCategory} is ${Math.abs(pattern.evidence.deviationPercent)}% ${pattern.evidence.deviationPercent >= 0 ? "above" : "below"} baseline. Was this caused by a known sale, outage, campaign, weather event, or data correction?`;
+}
+
+function patternSuggestedActions(pattern) {
+  return [
+    { action: "Add new event", tool: "create_known_event" },
+    { action: "Link existing event", tool: "link_pattern_to_event" },
+    { action: "Classify as data issue", tool: "classify_demand_pattern" },
+    { action: "Simulate workforce impact", tool: "simulate_workforce_scenario" }
+  ];
+}
+
+function previewEventAdjustment(pattern, event) {
+  if (!event) return null;
+  const impactPercent = Number(event.impactPercent || 0);
+  return {
+    eventId: event.eventId,
+    eventName: event.eventName,
+    impactPercent,
+    forecastExpectedBeforeMinutes: pattern.forecastExpectedMinutes,
+    forecastExpectedAfterMinutes: Math.round(pattern.forecastExpectedMinutes * (1 + impactPercent / 100))
+  };
+}
+
+function workforceActionOptions(recommendation = {}) {
+  const gap = Math.max(0, recommendation.capacityGapOrSurplusMinutes || recommendation.expectedImpact?.capacityGapBeforeMinutes || 1320);
+  if (recommendation.recommendationType === "REDEPLOY_OR_RELEASE") {
+    return [
+      { actionCode: "REDEPLOY_RESOURCES", actionType: "redeploy_resources", resourceCount: 2, capacityMinutes: 1320, sourceArea: recommendation.area, targetArea: "SOUTH", durationDays: 5, riskLevel: "LOW" },
+      { actionCode: "RELEASE_TEMP_CAPACITY", actionType: "release_temporary_capacity", resourceCount: 2, capacityMinutes: -1320, durationDays: 10, riskLevel: "MEDIUM" },
+      { actionCode: "REOPEN_BOOKING", actionType: "booking_control", bookingStatus: "open", quotaDeltaMinutes: 900, riskLevel: "LOW" }
+    ];
+  }
+  return [
+    { actionCode: "ADD_CONTRACTOR_CAPACITY", actionType: "add_contractor_resources", resourceCount: Math.max(1, Math.ceil(gap / 2400)), capacityMinutes: Math.max(660, Math.min(gap, 2640)), durationDays: 10, riskLevel: "LOW" },
+    { actionCode: "ADD_OVERTIME", actionType: "add_overtime", overtimeHours: 120, capacityMinutes: 7200, durationDays: 5, riskLevel: "MEDIUM" },
+    { actionCode: "BORROW_RESOURCES", actionType: "borrow_resources", resourceCount: 2, sourceArea: "WEST", capacityMinutes: 1320, durationDays: 5, riskLevel: "MEDIUM" },
+    { actionCode: "REDUCE_BOOKING_EXPOSURE", actionType: "booking_control", quotaDeltaMinutes: -900, bookingStatus: "restricted", riskLevel: "LOW" }
+  ];
+}
+
+function buildScenario({ scenarioName, sourceRecommendationId, filters, scenarioActions }) {
+  const cells = filterCells(filters);
+  const beforeMetrics = summarizeCells(cells);
+  const capacityDelta = scenarioActions.reduce((total, action) => total + Number(action.capacityMinutes || action.quotaDeltaMinutes || 0), 0);
+  const forecastDelta = scenarioActions.reduce((total, action) => total + Number(action.forecastDeltaMinutes || 0), 0);
+  const afterForecast = Math.max(0, beforeMetrics.forecastExpectedMinutes + forecastDelta);
+  const afterCapacity = Math.max(0, beforeMetrics.availableCapacityMinutes + capacityDelta);
+  const afterMetrics = {
+    ...beforeMetrics,
+    forecastExpectedMinutes: afterForecast,
+    availableCapacityMinutes: afterCapacity,
+    capacityGapMinutes: Math.max(0, afterForecast - afterCapacity),
+    capacitySurplusMinutes: Math.max(0, afterCapacity - beforeMetrics.forecastMaxMinutes),
+    utilization: ratio(afterForecast, afterCapacity)
+  };
+  return {
+    scenarioId: `SCN-${String(state.workforceScenarios.length + 1).padStart(5, "0")}-${hashId(`${scenarioName}${state.workforceScenarios.length}`)}`,
+    scenarioName,
+    sourceRecommendationId,
+    createdAt: BASE_NOW,
+    status: "simulated",
+    filters,
+    timeHorizon: horizonForCells(cells),
+    areas: [...new Set(cells.map((cell) => cell.area))],
+    capacityCategories: [...new Set(cells.map((cell) => cell.capacityCategory))],
+    scenarioActions,
+    beforeMetrics,
+    afterMetrics,
+    residualRisk: riskLevelForScore(forecastRiskScore(afterMetrics)),
+    recommendedDecision: afterMetrics.capacityGapMinutes <= beforeMetrics.capacityGapMinutes * 0.25 ? "REQUEST_APPROVAL" : "COMPARE_ALTERNATIVES",
+    tradeoffs: scenarioActions.map((action) => ({ actionCode: action.actionCode, tradeoff: action.riskLevel === "LOW" ? "Low operational risk" : "Requires supervisor review" }))
+  };
+}
+
+function actionLabel(action) {
+  return `${action.actionCode || action.actionType}: ${action.capacityMinutes || action.quotaDeltaMinutes || 0} minutes`;
+}
+
+function scenarioComparisonScore(scenario) {
+  return Math.max(0, 100 - Math.round(scenario.afterMetrics.capacityGapMinutes / 120) - Math.round(Math.abs(1 - scenario.afterMetrics.utilization) * 20));
+}
+
+function scenarioCapacityDelta(scenario) {
+  return scenario.scenarioActions.reduce((total, action) => total + Number(action.capacityMinutes || 0), 0);
+}
+
+function reviewSummaryForScenario(scenario) {
+  return `${scenario.scenarioName}: ${scenario.beforeMetrics.capacityGapMinutes} minutes gap before, ${scenario.afterMetrics.capacityGapMinutes} minutes gap after, residual risk ${scenario.residualRisk}. Recommended decision: ${scenario.recommendedDecision}.`;
+}
+
+function scenarioFromArgs(args) {
+  const reviewPackage = args.reviewPackageId ? findReviewPackage(args.reviewPackageId) : null;
+  const scenarioId = args.scenarioId || reviewPackage?.scenarioId;
+  const scenario = state.workforceScenarios.find((item) => item.scenarioId === scenarioId);
+  if (!scenario) throw new ToolError("scenario_not_found", "No scenario found for the supplied scenarioId or reviewPackageId.", args);
+  return scenario;
+}
+
+function findReviewPackage(reviewPackageId) {
+  const reviewPackage = state.reviewPackages.find((item) => item.reviewPackageId === reviewPackageId);
+  if (!reviewPackage) throw new ToolError("review_package_not_found", `No review package found for ${reviewPackageId}.`);
+  return reviewPackage;
+}
+
+function normalizeKnownEvent(input, eventId) {
+  return {
+    eventId,
+    eventName: input.eventName,
+    eventType: input.eventType || "other",
+    startDate: input.startDate,
+    endDate: input.endDate || input.startDate,
+    areas: normalizeList(input.areas || input.area) || [],
+    capacityCategories: normalizeList(input.capacityCategories || input.capacityCategory) || [],
+    activityTypes: normalizeList(input.activityTypes || input.activityType) || [],
+    skills: normalizeList(input.skills || input.skill) || [],
+    impactDirection: input.impactDirection || "increase_workload",
+    impactPercent: Number(input.impactPercent || 0),
+    impactMinutes: Number(input.impactMinutes || 0),
+    recurrence: input.recurrence || "none",
+    notes: input.notes || "",
+    createdBy: input.createdBy || "mock-planner",
+    createdAt: input.createdAt || BASE_NOW,
+    forecastAdjustmentState: input.forecastAdjustmentState || "proposed"
+  };
+}
+
+function findKnownEvent(eventId) {
+  const event = state.knownEvents.find((item) => item.eventId === eventId);
+  if (!event) throw new ToolError("event_not_found", `No known event found for ${eventId}.`);
+  return event;
+}
+
+function filterKnownEvents(args = {}) {
+  const filters = expandDateRange(args);
+  const dates = normalizeList(filters.dates || filters.date);
+  return state.knownEvents.filter((event) =>
+    (!dates || dates.some((date) => date >= event.startDate && date <= event.endDate)) &&
+    matchAny(event.areas, normalizeList(filters.areas || filters.area)) &&
+    matchAny(event.capacityCategories, normalizeList(filters.capacityCategories || filters.capacityCategory)) &&
+    matchAny(event.activityTypes, normalizeList(filters.activityTypes || filters.activityType)) &&
+    matchAny(event.skills, normalizeList(filters.skills || filters.skill)) &&
+    matchList(event.eventId, normalizeList(args.eventIds || args.eventId)) &&
+    matchList(event.forecastAdjustmentState, normalizeList(args.status))
+  );
+}
+
+function eventSummary(event) {
+  return pick(event, ["eventId", "eventName", "eventType", "startDate", "endDate", "areas", "capacityCategories", "impactPercent", "recurrence", "forecastAdjustmentState"]);
+}
+
+function ratio(numerator, denominator) {
+  return Number((Number(numerator || 0) / Math.max(1, Number(denominator || 0))).toFixed(2));
+}
+
 async function readJson(request) {
   if (!request.body) return {};
   const text = await request.text();
@@ -1424,6 +2494,29 @@ function mutationSchema(extra = {}) {
   };
 }
 
+function knownEventSchema() {
+  return {
+    type: "object",
+    properties: {
+      eventName: { type: "string" },
+      eventType: { type: "string" },
+      startDate: { type: "string" },
+      endDate: { type: "string" },
+      areas: arrayOrString("Affected areas."),
+      capacityCategories: arrayOrString("Affected capacity categories."),
+      activityTypes: arrayOrString("Affected activity types."),
+      skills: arrayOrString("Affected skills."),
+      impactDirection: { type: "string" },
+      impactPercent: { type: "number" },
+      impactMinutes: { type: "number" },
+      recurrence: { type: "string" },
+      notes: { type: "string" },
+      createdBy: { type: "string" }
+    },
+    required: ["eventName", "startDate"]
+  };
+}
+
 function arrayOrString(description) {
   return {
     oneOf: [{ type: "array", items: { type: "string" } }, { type: "string" }],
@@ -1433,6 +2526,7 @@ function arrayOrString(description) {
 
 function normalizeList(value) {
   if (value === undefined || value === null || value === "") return null;
+  if (Array.isArray(value) && value.length === 0) return null;
   return Array.isArray(value) ? value : [value];
 }
 

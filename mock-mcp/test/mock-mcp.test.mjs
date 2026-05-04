@@ -11,6 +11,9 @@ test("lists tools through MCP", async () => {
   const body = await response.json();
   assert.ok(body.result.tools.find((tool) => tool.name === "analyze_capacity_risk"));
   assert.ok(body.result.tools.find((tool) => tool.name === "move_activities"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "analyze_forecast_workforce_recommendations"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "simulate_workforce_scenario"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "create_known_event"));
 });
 
 test("supports StreamableHTTP MCP probes and text tool results", async () => {
@@ -190,4 +193,77 @@ test("applies a recommended action bundle", async () => {
   assert.equal(result.closingScheduleUpdates.length, 1);
   assert.equal(result.communications.length, 1);
   assert.equal(result.stateUpdate.state, "applied");
+});
+
+test("returns forecast workforce recommendations and geography outlook", async () => {
+  resetState();
+  const recommendations = await callTool("analyze_forecast_workforce_recommendations", {
+    dateRange: { start: "2026-05-14", end: "2026-05-21" },
+    limit: 5
+  });
+  assert.ok(recommendations.items.length > 0);
+  assert.ok(recommendations.items.some((item) => ["ADD_CAPACITY", "INVESTIGATE_PATTERN", "REDEPLOY_OR_RELEASE"].includes(item.recommendationType)));
+
+  const outlook = await callTool("get_forecast_geography_outlook", {
+    dateRange: { start: "2026-05-14", end: "2026-05-21" },
+    geoLevel: "region"
+  });
+  assert.ok(outlook.items.length > 0);
+  assert.ok(outlook.items[0].geographyKey);
+  assert.ok(outlook.items[0].recommendedAction);
+});
+
+test("supports demand event memory and forecast adjustment", async () => {
+  resetState();
+  const created = await callTool("create_known_event", {
+    eventName: "Mock weekend sale",
+    eventType: "sale",
+    startDate: "2026-05-18",
+    endDate: "2026-05-19",
+    areas: ["EAST"],
+    capacityCategories: ["INSPECTION"],
+    impactPercent: 20,
+    recurrence: "monthly"
+  });
+  assert.equal(created.event.eventName, "Mock weekend sale");
+
+  const applied = await callTool("apply_forecast_event_adjustment", { eventId: created.event.eventId });
+  assert.equal(applied.event.forecastAdjustmentState, "applied");
+  assert.ok(applied.adjustedCount > 0);
+
+  const removed = await callTool("remove_forecast_event_adjustment", { eventId: created.event.eventId });
+  assert.ok(removed.restoredCount > 0);
+});
+
+test("simulates, reviews, applies, and rolls back workforce scenario", async () => {
+  resetState();
+  const recommendation = await callTool("analyze_forecast_workforce_recommendations", {
+    dateRange: { start: "2026-05-14", end: "2026-05-21" },
+    areas: ["NORTH"],
+    capacityCategories: ["FIBER_INSTALL"],
+    limit: 1
+  });
+  const simulation = await callTool("simulate_workforce_scenario", {
+    recommendationId: recommendation.items[0].recommendationId,
+    save: true
+  });
+  assert.ok(simulation.scenario.scenarioId.startsWith("SCN-"));
+
+  const review = await callTool("create_workforce_review_package", {
+    scenarioId: simulation.scenario.scenarioId,
+    owner: "Ops Manager"
+  });
+  assert.equal(review.reviewPackage.scenarioId, simulation.scenario.scenarioId);
+
+  const applied = await callTool("apply_workforce_scenario", {
+    reviewPackageId: review.reviewPackage.reviewPackageId
+  });
+  assert.equal(applied.scenario.status, "applied");
+  assert.ok(applied.updatedCellCount > 0);
+
+  const rolledBack = await callTool("rollback_workforce_scenario", {
+    scenarioId: simulation.scenario.scenarioId
+  });
+  assert.equal(rolledBack.scenario.status, "rolled_back");
+  assert.ok(rolledBack.restoredCount > 0);
 });
