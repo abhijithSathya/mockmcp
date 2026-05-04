@@ -979,6 +979,7 @@ const TOOL_HANDLERS = {
     const cells = filterCells(args);
     const patterns = demandPatterns(args);
     const totals = summarizeCells(cells);
+    const chartView = buildForecastChart(cells, "Forecast workload outlook");
     return {
       generatedAt: BASE_NOW,
       filters: normalizedFilterSummary(args),
@@ -1000,6 +1001,7 @@ const TOOL_HANDLERS = {
         openRecommendationCount: TOOL_HANDLERS.analyze_forecast_workforce_recommendations({ ...args, limit: 100 }).items.length,
         detectedPatternCount: patterns.length
       },
+      chartView,
       topRecommendations: TOOL_HANDLERS.analyze_forecast_workforce_recommendations({ ...args, limit: 5 }).items,
       topPatterns: patterns.slice(0, 5)
     };
@@ -1056,7 +1058,14 @@ const TOOL_HANDLERS = {
       };
     }).filter((item) => args.includeSurplus || item.mapState !== "SURPLUS" || item.surplusScore >= 45)
       .sort((a, b) => Math.max(b.riskScore, b.surplusScore) - Math.max(a.riskScore, a.surplusScore));
-    return { generatedAt: BASE_NOW, geographyLevel: geoLevel, items };
+    return {
+      generatedAt: BASE_NOW,
+      geographyLevel: geoLevel,
+      items,
+      resourceCrunchMap: buildResourceCrunchMap(items, args),
+      forecastChart: buildForecastChart(filterCells(args), "Demand Forecaster"),
+      scheduleLeadTimeMatrix: buildScheduleLeadTimeMatrix(items)
+    };
   },
   get_capacity_outlook: (args) => ({
     generatedAt: BASE_NOW,
@@ -2088,6 +2097,180 @@ function forecastRecommendations(args = {}) {
     });
   }
   return recommendations;
+}
+
+function buildForecastChart(cells, title) {
+  const series = [...groupCells(cells, (cell) => cell.date).entries()]
+    .map(([date, dayCells]) => {
+      const totals = summarizeCells(dayCells);
+      return {
+        date,
+        label: date.slice(5),
+        actualWorkloadMinutes: historicalActualForCells(dayCells),
+        availableCapacityMinutes: totals.availableCapacityMinutes,
+        forecastMinMinutes: totals.forecastMinMinutes,
+        forecastExpectedMinutes: totals.forecastExpectedMinutes,
+        forecastMaxMinutes: totals.forecastMaxMinutes,
+        bookedWorkloadMinutes: totals.bookedWorkloadMinutes
+      };
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+  return {
+    title,
+    xAxisLabel: "Date",
+    yAxisLabel: "Minutes",
+    series,
+    chartWidgetConfig: {
+      type: "line",
+      data: {
+        labels: series.map((item) => item.label),
+        datasets: [
+          { label: "Available Resources", data: series.map((item) => item.availableCapacityMinutes) },
+          { label: "Actual Workload", data: series.map((item) => item.actualWorkloadMinutes) },
+          { label: "Forecasted Max Workload", data: series.map((item) => item.forecastMaxMinutes) },
+          { label: "Forecasted Min Workload", data: series.map((item) => item.forecastMinMinutes) },
+          { label: "Booked Workload", data: series.map((item) => item.bookedWorkloadMinutes) }
+        ]
+      },
+      insights: [
+        "Compare available resources with actual workload and forecast min/max workload.",
+        "Resource crunch exists when forecasted workload stays above available resources."
+      ]
+    }
+  };
+}
+
+function buildResourceCrunchMap(items, args) {
+  const zones = items.map((item, index) => {
+    const area = item.areas[0] || AREAS[index % AREAS.length];
+    const geometry = mapGeometryForArea(area, index);
+    const crunchScore = Math.max(item.riskScore || 0, item.surplusScore || 0);
+    const stateColor = item.mapState === "SHORTAGE" ? "#c2410c" : item.mapState === "SURPLUS" ? "#047857" : "#64748b";
+    return {
+      zoneId: item.geographyKey,
+      area,
+      label: item.geographyKey,
+      mapState: item.mapState,
+      stateColor,
+      crunchScore,
+      utilization: item.utilization,
+      capacityGapMinutes: item.capacityGapMinutes,
+      capacitySurplusMinutes: item.capacitySurplusMinutes,
+      requiredResourceCount: Math.max(0, Math.ceil(item.capacityGapMinutes / 1980)),
+      productivityGainHoursPerWeek: Math.max(0, Math.round(item.capacityGapMinutes / 60 / 2)),
+      requiredWorkSkills: dominantSkillsForAreas(item.areas),
+      optionalWorkSkills: ["Maintenance", "Deinstall"],
+      locationLabel: locationLabelForArea(area),
+      center: geometry.center,
+      polygon: geometry.polygon
+    };
+  });
+  const demandDots = zones.flatMap((zone, zoneIndex) => makeDemandDots(zone, zoneIndex));
+  const resourceMarkers = zones.map((zone, index) => ({
+    markerId: `RES-MARKER-${index + 1}`,
+    zoneId: zone.zoneId,
+    x: zone.center.x,
+    y: zone.center.y,
+    resourceCount: Math.max(1, Math.round((100 - zone.crunchScore) / 15)),
+    highlighted: zone.mapState === "SHORTAGE",
+    label: zone.requiredResourceCount > 0 ? `Hire ${zone.requiredResourceCount}` : "Monitor"
+  }));
+  const selectedInsightZone = [...zones].sort((a, b) => b.capacityGapMinutes - a.capacityGapMinutes)[0] || zones[0];
+  return {
+    title: "Resource crunch heat map",
+    subtitle: "Demand density and resource markers by Field Service region",
+    dateRange: args.dateRange || horizonForCells(filterCells(args)),
+    zones,
+    demandDots,
+    resourceMarkers,
+    insight: selectedInsightZone ? {
+      title: `Hire ${selectedInsightZone.requiredResourceCount || 1} resource to increase productivity`,
+      description: `Expected productivity gain is ${selectedInsightZone.productivityGainHoursPerWeek || 12} extra hrs per week in ${selectedInsightZone.locationLabel}.`,
+      requiredWorkSkills: selectedInsightZone.requiredWorkSkills,
+      optionalWorkSkills: selectedInsightZone.optionalWorkSkills,
+      location: selectedInsightZone.locationLabel
+    } : null,
+    svgDataUrl: buildResourceCrunchSvgDataUrl(zones, demandDots, resourceMarkers, selectedInsightZone)
+  };
+}
+
+function buildScheduleLeadTimeMatrix(items) {
+  const months = ["Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov"];
+  const highestRisk = items.reduce((max, item) => Math.max(max, item.riskScore || 0), 0);
+  const current = [3.5, 4.1, 4.4, 4.9, null, null, null, null, null];
+  const forecasted = [null, null, null, null, 5.3, 5.5, 5.8, 6.1, 6.4].map((value) => value === null ? null : Number((value + highestRisk / 200).toFixed(1)));
+  const implemented = forecasted.map((value) => value === null ? null : Number(Math.max(3.8, value - 0.4).toFixed(1)));
+  return {
+    title: "Average days to schedule",
+    months,
+    rows: [
+      { label: "Avg. no. of days to schedule", values: current },
+      { label: "Forecasted avg no. of days to schedule", values: forecasted },
+      { label: "Forecasted avg no. of days to schedule if implemented", values: implemented }
+    ]
+  };
+}
+
+function mapGeometryForArea(area, index) {
+  const geometries = {
+    NORTH: { center: { x: 62, y: 26 }, polygon: "50,10 82,12 92,32 70,43 48,34" },
+    SOUTH: { center: { x: 55, y: 70 }, polygon: "38,54 70,52 82,78 58,88 36,80" },
+    EAST: { center: { x: 82, y: 48 }, polygon: "70,31 94,35 96,66 76,68 68,50" },
+    WEST: { center: { x: 25, y: 46 }, polygon: "8,28 42,30 38,65 14,68 4,48" }
+  };
+  return geometries[area] || { center: { x: 20 + index * 18, y: 40 + index * 7 }, polygon: "10,10 35,10 35,35 10,35" };
+}
+
+function dominantSkillsForAreas(areas = []) {
+  if (areas.includes("NORTH")) return ["Install", "Fiber L2"];
+  if (areas.includes("SOUTH")) return ["Repair", "Copper"];
+  if (areas.includes("EAST")) return ["Inspection", "Safety Certified"];
+  return ["Maintenance", "Fiber L1"];
+}
+
+function locationLabelForArea(area) {
+  const labels = {
+    NORTH: "Boston, 02110",
+    SOUTH: "Florida, 32013",
+    EAST: "Newark, 07102",
+    WEST: "San Jose, 95113"
+  };
+  return labels[area] || area;
+}
+
+function makeDemandDots(zone, zoneIndex) {
+  const count = Math.max(12, Math.min(80, Math.round((zone.crunchScore || 35) * 0.85)));
+  return Array.from({ length: count }, (_, index) => {
+    const angle = (index * 137.5 + zoneIndex * 29) % 360;
+    const radius = 3 + (index % 9) * 1.4;
+    return {
+      dotId: `DOT-${zoneIndex + 1}-${index + 1}`,
+      zoneId: zone.zoneId,
+      x: Math.max(4, Math.min(96, Number((zone.center.x + Math.cos(angle * Math.PI / 180) * radius).toFixed(1)))),
+      y: Math.max(4, Math.min(92, Number((zone.center.y + Math.sin(angle * Math.PI / 180) * radius).toFixed(1)))),
+      intensity: zone.mapState === "SHORTAGE" ? "high" : zone.mapState === "SURPLUS" ? "low" : "medium"
+    };
+  });
+}
+
+function buildResourceCrunchSvgDataUrl(zones, demandDots, resourceMarkers, selectedZone) {
+  const zoneShapes = zones.map((zone) =>
+    `<polygon points="${zone.polygon}" fill="${zone.mapState === "SHORTAGE" ? "#fff7ed" : zone.mapState === "SURPLUS" ? "#ecfdf5" : "#f8fafc"}" stroke="#e9d5ff" stroke-width="0.6"/>`
+  ).join("");
+  const dots = demandDots.map((dot) => `<circle cx="${dot.x}%" cy="${dot.y}%" r="0.55" fill="#b45309" opacity="0.86"/>`).join("");
+  const markers = resourceMarkers.map((marker) => {
+    const glow = marker.highlighted ? `<circle cx="${marker.x}%" cy="${marker.y}%" r="5.2" fill="#22c55e" opacity="0.35"/>` : "";
+    return `${glow}<rect x="${marker.x - 1.6}%" y="${marker.y - 3.6}%" width="3.2%" height="4.2%" rx="0.4" fill="#ffffff" stroke="#94a3b8"/><circle cx="${marker.x}%" cy="${marker.y - 2.25}%" r="0.55" fill="#0284c7"/><path d="M ${marker.x - 0.8} ${marker.y - 0.8} Q ${marker.x} ${marker.y - 1.7} ${marker.x + 0.8} ${marker.y - 0.8}" stroke="#0284c7" stroke-width="0.3" fill="none"/><path d="M ${marker.x - 0.9} ${marker.y + 0.5} L ${marker.x} ${marker.y + 2.6} L ${marker.x + 0.9} ${marker.y + 0.5}" fill="#ffffff" stroke="#475569" stroke-width="0.35"/>`;
+  }).join("");
+  const insight = selectedZone ? `<text x="71%" y="17%" font-size="4" fill="#0f172a">Insights</text><text x="72%" y="23%" font-size="3.4" fill="#0369a1">Hire ${selectedZone.requiredResourceCount || 1} resource to increase</text><text x="72%" y="28%" font-size="3.4" fill="#0369a1">productivity by ${selectedZone.productivityGainHoursPerWeek || 12} extra hrs/week</text><text x="72%" y="39%" font-size="2.8" fill="#334155">Required Work Skills: ${selectedZone.requiredWorkSkills.join(", ")}</text><text x="72%" y="44%" font-size="2.8" fill="#334155">Optional Work Skills: ${selectedZone.optionalWorkSkills.join(", ")}</text><text x="72%" y="49%" font-size="2.8" fill="#334155">Location: ${selectedZone.locationLabel}</text>` : "";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620"><rect width="1200" height="620" fill="#ffffff"/><text x="32" y="42" font-size="24" font-family="Arial" fill="#0f172a">Resource Crunch Heat Map</text><g transform="translate(40,70) scale(8.1 5.1)">${zoneShapes}${dots}${markers}</g>${insight}<text x="32" y="590" font-size="17" font-family="Arial" fill="#64748b">Brown dots = forecast demand density. Pins = available resources. Green glow = best add-resource opportunity.</text></svg>`;
+  return `data:image/svg+xml;base64,${base64Encode(svg)}`;
+}
+
+function base64Encode(value) {
+  if (typeof btoa === "function") return btoa(value);
+  if (typeof Buffer !== "undefined") return Buffer.from(value, "utf8").toString("base64");
+  throw new Error("No base64 encoder available in this runtime.");
 }
 
 function forecastRecommendationById(recommendationId) {

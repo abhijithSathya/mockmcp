@@ -211,6 +211,11 @@ test("returns forecast workforce recommendations and geography outlook", async (
   assert.ok(outlook.items.length > 0);
   assert.ok(outlook.items[0].geographyKey);
   assert.ok(outlook.items[0].recommendedAction);
+  assert.ok(outlook.resourceCrunchMap.svgDataUrl.startsWith("data:image/svg+xml;base64,"));
+  assert.ok(outlook.resourceCrunchMap.demandDots.length > 0);
+  assert.equal(outlook.forecastChart.chartWidgetConfig.type, "line");
+  assert.ok(outlook.forecastChart.chartWidgetConfig.data.datasets.some((dataset) => dataset.label === "Forecasted Max Workload"));
+  assert.ok(outlook.scheduleLeadTimeMatrix.rows.length >= 3);
 });
 
 test("supports demand event memory and forecast adjustment", async () => {
