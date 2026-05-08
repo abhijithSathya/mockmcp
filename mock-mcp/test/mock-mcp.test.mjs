@@ -14,6 +14,9 @@ test("lists tools through MCP", async () => {
   assert.ok(body.result.tools.find((tool) => tool.name === "analyze_forecast_workforce_recommendations"));
   assert.ok(body.result.tools.find((tool) => tool.name === "simulate_workforce_scenario"));
   assert.ok(body.result.tools.find((tool) => tool.name === "create_known_event"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "get_workforce_management_insights"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "get_workforce_management_trends"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "get_workforce_management_actions"));
 });
 
 test("supports StreamableHTTP MCP probes and text tool results", async () => {
@@ -216,6 +219,28 @@ test("returns forecast workforce recommendations and geography outlook", async (
   assert.equal(outlook.forecastChart.chartWidgetConfig.type, "line");
   assert.ok(outlook.forecastChart.chartWidgetConfig.data.datasets.some((dataset) => dataset.label === "Forecasted Max Workload"));
   assert.ok(outlook.scheduleLeadTimeMatrix.rows.length >= 3);
+});
+
+test("returns Workforce Management insight panel data, charts, and actions", async () => {
+  resetState();
+  const insights = await callTool("get_workforce_management_insights", {});
+  assert.deepEqual(insights.lookbackMonths, ["2026-02", "2026-03", "2026-04"]);
+  assert.equal(insights.table.rows.length, 2);
+  assert.ok(insights.table.rows.find((row) => row.capacityArea === "CA" && row.idleTimeMinutes > row.idleTimeTargetMinutes));
+  assert.ok(insights.table.rows.find((row) => row.capacityArea === "FL" && row.timeToStartDays > row.timeToStartTargetDays));
+  assert.equal(insights.charts.idleTime.chartWidgetConfig.type, "line");
+  assert.equal(insights.charts.timeToStart.chartWidgetConfig.type, "line");
+  assert.ok(insights.actions.find((action) => action.title === "Address resource idle time in CA"));
+  assert.ok(insights.actions.find((action) => action.title === "Address increase in time to start activities in FL"));
+
+  const trends = await callTool("get_workforce_management_trends", { metric: "idleTime", capacityAreas: ["CA"] });
+  assert.deepEqual(trends.capacityAreas, ["CA"]);
+  assert.ok(trends.charts.idleTime.chartWidgetConfig.data.datasets.some((dataset) => dataset.label === "CA Idle Time"));
+  assert.equal(trends.charts.timeToStart, undefined);
+
+  const actions = await callTool("get_workforce_management_actions", { issueTypes: ["TIME_TO_START"] });
+  assert.deepEqual(actions.items.map((action) => action.capacityArea), ["FL"]);
+  assert.equal(actions.items[0].buttonLabel, "Review recommendations");
 });
 
 test("supports demand event memory and forecast adjustment", async () => {

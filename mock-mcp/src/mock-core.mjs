@@ -19,6 +19,35 @@ const CATEGORIES = [
 ];
 const SKILLS = ["FIBER_L1", "FIBER_L2", "COPPER", "METERING", "SAFETY_CERTIFIED"];
 const VALID_BOOKING_STATUSES = ["open", "closed", "restricted"];
+const WFM_MONTHS = ["2026-02", "2026-03", "2026-04"];
+const WFM_CAPACITY_AREA_INSIGHTS = [
+  {
+    capacityArea: "CA",
+    capacityAreaName: "California",
+    observation: "Average idle time is trending above target",
+    idleTimeMinutes: 64,
+    idleTimeTargetMinutes: 45,
+    timeToStartDays: 1.8,
+    timeToStartTargetDays: 2.2,
+    idleTimeTrendMinutes: [52, 58, 64],
+    timeToStartTrendDays: [1.7, 1.8, 1.8],
+    dominantIssue: "IDLE_TIME",
+    severity: "AT_RISK"
+  },
+  {
+    capacityArea: "FL",
+    capacityAreaName: "Florida",
+    observation: "Average days to start activities increased",
+    idleTimeMinutes: 33,
+    idleTimeTargetMinutes: 45,
+    timeToStartDays: 3.6,
+    timeToStartTargetDays: 2.4,
+    idleTimeTrendMinutes: [29, 31, 33],
+    timeToStartTrendDays: [2.4, 2.9, 3.6],
+    dominantIssue: "TIME_TO_START",
+    severity: "CRITICAL"
+  }
+];
 const sseClients = new Map();
 const mcpEvents = [];
 
@@ -50,9 +79,11 @@ export function getPublicState() {
       knownEvents: state.knownEvents.length,
       workforceScenarios: state.workforceScenarios.length,
       reviewPackages: state.reviewPackages.length,
-      auditEvents: state.auditEvents.length
+      auditEvents: state.auditEvents.length,
+      workforceManagementCapacityAreas: WFM_CAPACITY_AREA_INSIGHTS.length
     },
     areas: AREAS,
+    workforceManagementAreas: WFM_CAPACITY_AREA_INSIGHTS.map((item) => item.capacityArea),
     capacityCategories: CATEGORIES,
     skills: SKILLS,
     bookingStatuses: VALID_BOOKING_STATUSES
@@ -437,6 +468,37 @@ const TOOL_METADATA = {
   get_forecast_summary: {
     description: "Return high-level forecast workforce KPIs for the Forecast Command Center.",
     inputSchema: filterSchema()
+  },
+  get_workforce_management_insights: {
+    description: "Return panel-ready Workforce Management insight rows, idle-time chart, time-to-start chart, and review actions by capacity area.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityAreas: arrayOrString("Capacity area codes such as CA or FL."),
+        includeCharts: { type: "boolean" },
+        includeActions: { type: "boolean" }
+      }
+    }
+  },
+  get_workforce_management_trends: {
+    description: "Return chart-ready idle time and time-to-start trends for the past 3 months by capacity area.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityAreas: arrayOrString("Capacity area codes such as CA or FL."),
+        metric: { type: "string", enum: ["all", "idleTime", "timeToStart"] }
+      }
+    }
+  },
+  get_workforce_management_actions: {
+    description: "Return recommendation-review actions for Workforce Management issues by capacity area.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityAreas: arrayOrString("Capacity area codes such as CA or FL."),
+        issueTypes: arrayOrString("Issue types such as IDLE_TIME or TIME_TO_START.")
+      }
+    }
   },
   get_forecast_workload_series: {
     description: "Return chart-ready actual, forecast, plan, booked workload, and capacity series.",
@@ -1004,6 +1066,59 @@ const TOOL_HANDLERS = {
       chartView,
       topRecommendations: TOOL_HANDLERS.analyze_forecast_workforce_recommendations({ ...args, limit: 5 }).items,
       topPatterns: patterns.slice(0, 5)
+    };
+  },
+  get_workforce_management_insights: (args) => {
+    const rows = filterWfmCapacityAreas(args);
+    return {
+      generatedAt: BASE_NOW,
+      lookbackMonths: WFM_MONTHS,
+      filters: {
+        capacityAreas: normalizeList(args.capacityAreas || args.capacityArea)
+      },
+      summary: summarizeWfmInsights(rows),
+      table: {
+        columns: [
+          { key: "capacityArea", label: "Capacity Area" },
+          { key: "observation", label: "Observations" },
+          { key: "idleTimeMinutes", label: "Avg Idle Time (min)" },
+          { key: "timeToStartDays", label: "Avg Time To Start (days)" }
+        ],
+        rows: rows.map(wfmInsightRow)
+      },
+      charts: args.includeCharts === false ? undefined : {
+        idleTime: buildWfmChart(rows, "idleTime", "Idle time variations over past 3 months"),
+        timeToStart: buildWfmChart(rows, "timeToStart", "Time to start variations over past 3 months")
+      },
+      actions: args.includeActions === false ? undefined : wfmActionsForRows(rows)
+    };
+  },
+  get_workforce_management_trends: (args) => {
+    const rows = filterWfmCapacityAreas(args);
+    const metric = args.metric || "all";
+    return {
+      generatedAt: BASE_NOW,
+      lookbackMonths: WFM_MONTHS,
+      capacityAreas: rows.map((row) => row.capacityArea),
+      charts: {
+        ...(metric === "all" || metric === "idleTime" ? { idleTime: buildWfmChart(rows, "idleTime", "Idle time variations over past 3 months") } : {}),
+        ...(metric === "all" || metric === "timeToStart" ? { timeToStart: buildWfmChart(rows, "timeToStart", "Time to start variations over past 3 months") } : {})
+      },
+      series: rows.map((row) => ({
+        capacityArea: row.capacityArea,
+        capacityAreaName: row.capacityAreaName,
+        idleTimeMinutes: row.idleTimeTrendMinutes.map((value, index) => ({ period: WFM_MONTHS[index], value })),
+        timeToStartDays: row.timeToStartTrendDays.map((value, index) => ({ period: WFM_MONTHS[index], value }))
+      }))
+    };
+  },
+  get_workforce_management_actions: (args) => {
+    const issueTypes = normalizeList(args.issueTypes || args.issueType);
+    const actions = wfmActionsForRows(filterWfmCapacityAreas(args))
+      .filter((action) => matchList(action.issueType, issueTypes));
+    return {
+      generatedAt: BASE_NOW,
+      items: actions
     };
   },
   get_forecast_workload_series: (args) => {
@@ -2209,6 +2324,122 @@ function buildScheduleLeadTimeMatrix(items) {
       { label: "Forecasted avg no. of days to schedule if implemented", values: implemented }
     ]
   };
+}
+
+function filterWfmCapacityAreas(args = {}) {
+  const capacityAreas = normalizeList(args.capacityAreas || args.capacityArea);
+  const rows = WFM_CAPACITY_AREA_INSIGHTS.filter((row) => matchList(row.capacityArea, capacityAreas));
+  if (!rows.length) {
+    throw new ToolError("capacity_area_not_found", "No matching Workforce Management capacity areas found.", {
+      requestedCapacityAreas: capacityAreas,
+      supportedCapacityAreas: WFM_CAPACITY_AREA_INSIGHTS.map((row) => row.capacityArea)
+    });
+  }
+  return rows;
+}
+
+function summarizeWfmInsights(rows) {
+  const idleAlerts = rows.filter((row) => row.idleTimeMinutes > row.idleTimeTargetMinutes).length;
+  const timeToStartAlerts = rows.filter((row) => row.timeToStartDays > row.timeToStartTargetDays).length;
+  return {
+    capacityAreaCount: rows.length,
+    idleTimeAlertCount: idleAlerts,
+    timeToStartAlertCount: timeToStartAlerts,
+    highestIdleTimeArea: [...rows].sort((a, b) => b.idleTimeMinutes - a.idleTimeMinutes)[0]?.capacityArea,
+    highestTimeToStartArea: [...rows].sort((a, b) => b.timeToStartDays - a.timeToStartDays)[0]?.capacityArea
+  };
+}
+
+function wfmInsightRow(row) {
+  return {
+    capacityArea: row.capacityArea,
+    capacityAreaName: row.capacityAreaName,
+    observation: row.observation,
+    idleTimeMinutes: row.idleTimeMinutes,
+    idleTimeTargetMinutes: row.idleTimeTargetMinutes,
+    idleTimeVarianceMinutes: row.idleTimeMinutes - row.idleTimeTargetMinutes,
+    timeToStartDays: row.timeToStartDays,
+    timeToStartTargetDays: row.timeToStartTargetDays,
+    timeToStartVarianceDays: Number((row.timeToStartDays - row.timeToStartTargetDays).toFixed(1)),
+    dominantIssue: row.dominantIssue,
+    severity: row.severity
+  };
+}
+
+function buildWfmChart(rows, metric, title) {
+  const isIdleTime = metric === "idleTime";
+  const dataKey = isIdleTime ? "idleTimeTrendMinutes" : "timeToStartTrendDays";
+  const targetKey = isIdleTime ? "idleTimeTargetMinutes" : "timeToStartTargetDays";
+  const yAxisLabel = isIdleTime ? "Minutes" : "Days";
+  const datasets = rows.flatMap((row) => [
+    {
+      label: `${row.capacityArea} ${isIdleTime ? "Idle Time" : "Time To Start"}`,
+      capacityArea: row.capacityArea,
+      data: row[dataKey]
+    },
+    {
+      label: `${row.capacityArea} Target`,
+      capacityArea: row.capacityArea,
+      data: WFM_MONTHS.map(() => row[targetKey]),
+      borderDash: [4, 4]
+    }
+  ]);
+  return {
+    title,
+    metric,
+    xAxisLabel: "Month",
+    yAxisLabel,
+    series: WFM_MONTHS.map((period, index) => ({
+      period,
+      values: rows.map((row) => ({
+        capacityArea: row.capacityArea,
+        value: row[dataKey][index],
+        target: row[targetKey]
+      }))
+    })),
+    chartWidgetConfig: {
+      type: "line",
+      data: {
+        labels: WFM_MONTHS,
+        datasets
+      },
+      insights: [
+        isIdleTime ? "Idle time above target indicates resource utilization opportunity." : "Increasing time to start indicates activity scheduling or dispatch latency.",
+        "Each dataset is scoped to a capacity area for panel-level comparison."
+      ]
+    }
+  };
+}
+
+function wfmActionsForRows(rows) {
+  return rows.map((row) => {
+    const idleIssue = row.dominantIssue === "IDLE_TIME";
+    const issueType = idleIssue ? "IDLE_TIME" : "TIME_TO_START";
+    return {
+      actionId: `WFM-${row.capacityArea}-${issueType}`,
+      capacityArea: row.capacityArea,
+      capacityAreaName: row.capacityAreaName,
+      issueType,
+      title: idleIssue
+        ? `Address resource idle time in ${row.capacityArea}`
+        : `Address increase in time to start activities in ${row.capacityArea}`,
+      buttonLabel: "Review recommendations",
+      severity: row.severity,
+      metricSnapshot: idleIssue
+        ? {
+          idleTimeMinutes: row.idleTimeMinutes,
+          targetMinutes: row.idleTimeTargetMinutes,
+          varianceMinutes: row.idleTimeMinutes - row.idleTimeTargetMinutes
+        }
+        : {
+          timeToStartDays: row.timeToStartDays,
+          targetDays: row.timeToStartTargetDays,
+          varianceDays: Number((row.timeToStartDays - row.timeToStartTargetDays).toFixed(1))
+        },
+      actionHandlerStatus: "pending_phase_2",
+      phase2Status: "not_implemented"
+    };
+  });
 }
 
 function mapGeometryForArea(area, index) {
