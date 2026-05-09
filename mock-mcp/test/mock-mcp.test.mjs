@@ -17,6 +17,9 @@ test("lists tools through MCP", async () => {
   assert.ok(body.result.tools.find((tool) => tool.name === "get_workforce_management_insights"));
   assert.ok(body.result.tools.find((tool) => tool.name === "get_workforce_management_trends"));
   assert.ok(body.result.tools.find((tool) => tool.name === "get_workforce_management_actions"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "get_time_to_start_hire_recommendations"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "simulate_time_to_start_hire_impact"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "save_time_to_start_hire_proposal"));
 });
 
 test("supports StreamableHTTP MCP probes and text tool results", async () => {
@@ -241,6 +244,46 @@ test("returns Workforce Management insight panel data, charts, and actions", asy
   const actions = await callTool("get_workforce_management_actions", { issueTypes: ["TIME_TO_START"] });
   assert.deepEqual(actions.items.map((action) => action.capacityArea), ["FL"]);
   assert.equal(actions.items[0].buttonLabel, "Review recommendations");
+});
+
+test("supports FL time-to-start hire recommendation selection, simulation, and save", async () => {
+  resetState();
+  const recommendations = await callTool("get_time_to_start_hire_recommendations", {
+    capacityArea: "FL",
+    issueType: "TIME_TO_START"
+  });
+  assert.equal(recommendations.options.length, 3);
+  assert.deepEqual(recommendations.options.map((option) => option.resourceId), [
+    "FL-HIRE-001",
+    "FL-HIRE-002",
+    "FL-HIRE-003"
+  ]);
+
+  const none = await callTool("simulate_time_to_start_hire_impact", { capacityArea: "FL", selectedResourceIds: [] });
+  assert.equal(none.impact.projectedAverageStartDays, 3.6);
+  assert.equal(none.impact.projectedWithinSevenDaysPercent, 72);
+
+  const one = await callTool("simulate_time_to_start_hire_impact", { capacityArea: "FL", selectedResourceIds: ["FL-HIRE-001"] });
+  assert.equal(one.impact.projectedAverageStartDays, 3.2);
+  assert.equal(one.impact.projectedWithinSevenDaysPercent, 75);
+
+  const two = await callTool("simulate_time_to_start_hire_impact", { capacityArea: "FL", selectedResourceIds: ["FL-HIRE-001", "FL-HIRE-002"] });
+  assert.equal(two.impact.projectedAverageStartDays, 2.7);
+  assert.equal(two.impact.projectedWithinSevenDaysPercent, 80);
+  assert.equal(two.chart.chartWidgetConfig.type, "line");
+
+  const three = await callTool("simulate_time_to_start_hire_impact", { capacityArea: "FL", selectedResourceIds: ["FL-HIRE-001", "FL-HIRE-002", "FL-HIRE-003"] });
+  assert.equal(three.impact.projectedAverageStartDays, 2.4);
+  assert.equal(three.impact.projectedWithinSevenDaysPercent, 84);
+
+  const saved = await callTool("save_time_to_start_hire_proposal", {
+    capacityArea: "FL",
+    selectedResourceIds: ["FL-HIRE-001", "FL-HIRE-002"]
+  });
+  assert.equal(saved.message, "Recommendation saved");
+  assert.equal(saved.proposal.status, "SAVED");
+  assert.equal(saved.proposal.proposedResourceCount, 2);
+  assert.ok(saved.proposal.proposalId.startsWith("HIRE-FL-"));
 });
 
 test("supports demand event memory and forecast adjustment", async () => {

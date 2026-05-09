@@ -48,6 +48,48 @@ const WFM_CAPACITY_AREA_INSIGHTS = [
     severity: "CRITICAL"
   }
 ];
+const WFM_HIRE_RECOMMENDATION_OPTIONS = [
+  {
+    resourceId: "FL-HIRE-001",
+    displayName: "Orlando contractor pod",
+    location: "Orlando, FL 32801",
+    requiredWorkSkills: ["Appliance Repair", "Preventive Maintenance"],
+    optionalWorkSkills: ["Customer Premise Equipment"],
+    weeklyCapacityHours: 32,
+    expectedImpact: "Reduces central Florida backlog and same-week reassignment delay.",
+    recommended: true
+  },
+  {
+    resourceId: "FL-HIRE-002",
+    displayName: "Tampa contractor pod",
+    location: "Tampa, FL 33602",
+    requiredWorkSkills: ["HVAC Service", "Electrical Diagnostics"],
+    optionalWorkSkills: ["Warranty Repairs"],
+    weeklyCapacityHours: 30,
+    expectedImpact: "Adds coverage for west-coast activity starts and emergency dispatch.",
+    recommended: true
+  },
+  {
+    resourceId: "FL-HIRE-003",
+    displayName: "Jacksonville contractor pod",
+    location: "Jacksonville, FL 32202",
+    requiredWorkSkills: ["Plumbing", "Compressor Diagnostics"],
+    optionalWorkSkills: ["Commercial Maintenance"],
+    weeklyCapacityHours: 28,
+    expectedImpact: "Improves north Florida appointment starts and overflow coverage.",
+    recommended: false
+  }
+];
+const WFM_HIRE_BASELINE = {
+  capacityArea: "FL",
+  issueType: "TIME_TO_START",
+  currentAverageStartDays: 3.6,
+  targetAverageStartDays: 2.4,
+  currentWithinSevenDaysPercent: 72,
+  targetWithinSevenDaysPercent: 80,
+  noHireForecastDays: [3.6, 3.7, 3.8, 3.8],
+  forecastPeriods: ["Current", "+30 days", "+60 days", "+90 days"]
+};
 const sseClients = new Map();
 const mcpEvents = [];
 
@@ -79,6 +121,7 @@ export function getPublicState() {
       knownEvents: state.knownEvents.length,
       workforceScenarios: state.workforceScenarios.length,
       reviewPackages: state.reviewPackages.length,
+      hireProposals: state.hireProposals.length,
       auditEvents: state.auditEvents.length,
       workforceManagementCapacityAreas: WFM_CAPACITY_AREA_INSIGHTS.length
     },
@@ -497,6 +540,40 @@ const TOOL_METADATA = {
       properties: {
         capacityAreas: arrayOrString("Capacity area codes such as CA or FL."),
         issueTypes: arrayOrString("Issue types such as IDLE_TIME or TIME_TO_START.")
+      }
+    }
+  },
+  get_time_to_start_hire_recommendations: {
+    description: "Return FL time-to-start hire recommendation observations, baseline metrics, and up to 3 selectable resource options.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityArea: { type: "string", description: "Capacity area code. Only FL is supported for this phase." },
+        issueType: { type: "string", enum: ["TIME_TO_START"], description: "Issue type for the hire flow." },
+        limit: { type: "number", description: "Maximum number of resource options to return." }
+      }
+    }
+  },
+  simulate_time_to_start_hire_impact: {
+    description: "Simulate FL time-to-start improvement for the selected hire resource options.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityArea: { type: "string", description: "Capacity area code. Only FL is supported for this phase." },
+        selectedResourceIds: arrayOrString("Selected resource option IDs such as FL-HIRE-001."),
+        selectedResources: { type: "array", items: { type: "object" }, description: "Selected row objects from the app multi-select widget." }
+      }
+    }
+  },
+  save_time_to_start_hire_proposal: {
+    description: "Save the selected FL time-to-start hire recommendation proposal in mock state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityArea: { type: "string", description: "Capacity area code. Only FL is supported for this phase." },
+        selectedResourceIds: arrayOrString("Selected resource option IDs such as FL-HIRE-001."),
+        selectedResources: { type: "array", items: { type: "object" }, description: "Selected row objects from the app multi-select widget." },
+        proposalText: { type: "string", description: "User-facing proposal summary to save." }
       }
     }
   },
@@ -1121,6 +1198,52 @@ const TOOL_HANDLERS = {
       items: actions
     };
   },
+  get_time_to_start_hire_recommendations: (args) => {
+    assertFlHireFlow(args);
+    const limit = Math.max(1, Math.min(3, Number(args.limit || 3)));
+    return {
+      generatedAt: BASE_NOW,
+      capacityArea: "FL",
+      capacityAreaName: "Florida",
+      issueType: "TIME_TO_START",
+      flow: "HIRE",
+      baseline: { ...WFM_HIRE_BASELINE },
+      observations: [
+        "Average days to start activities increased from 2.4 to 3.6 over the past 3 months.",
+        "Current Florida coverage starts 72% of activities within 7 days of creation.",
+        "Adding contractor capacity in Orlando and Tampa is projected to bring the metric back near target."
+      ],
+      recommendationSummary: "Add up to 3 contractor resources in Florida; review impact before saving the proposal.",
+      options: WFM_HIRE_RECOMMENDATION_OPTIONS.slice(0, limit).map((option) => ({ ...option }))
+    };
+  },
+  simulate_time_to_start_hire_impact: (args) => {
+    assertFlHireFlow(args);
+    return buildWfmHireImpact(args);
+  },
+  save_time_to_start_hire_proposal: (args) => {
+    assertFlHireFlow(args);
+    const impact = buildWfmHireImpact(args);
+    const proposal = {
+      proposalId: `HIRE-FL-${String(state.hireProposals.length + 1).padStart(4, "0")}`,
+      status: "SAVED",
+      createdAt: BASE_NOW,
+      capacityArea: "FL",
+      issueType: "TIME_TO_START",
+      flow: "HIRE",
+      selectedResourceIds: impact.selectedResourceIds,
+      selectedResources: impact.selectedResources,
+      proposedResourceCount: impact.selectedResources.length,
+      proposalText: args.proposalText || proposalTextForHireImpact(impact),
+      impact: impact.impact
+    };
+    state.hireProposals.push(proposal);
+    return {
+      generatedAt: BASE_NOW,
+      proposal,
+      message: "Recommendation saved"
+    };
+  },
   get_forecast_workload_series: (args) => {
     const cells = filterCells(args);
     const byDate = groupCells(cells, (cell) => args.granularity === "week" ? weekKey(cell.date) : cell.date);
@@ -1657,6 +1780,7 @@ function createSeedState() {
     knownEvents: createKnownEvents(),
     workforceScenarios: [],
     reviewPackages: [],
+    hireProposals: [],
     patternLinks: [],
     patternClassifications: [],
     eventAdjustments: [],
@@ -2440,6 +2564,113 @@ function wfmActionsForRows(rows) {
       phase2Status: "not_implemented"
     };
   });
+}
+
+function assertFlHireFlow(args = {}) {
+  const capacityArea = String(args.capacityArea || "FL").toUpperCase();
+  const issueType = String(args.issueType || "TIME_TO_START").toUpperCase();
+  if (capacityArea !== "FL" || issueType !== "TIME_TO_START") {
+    throw new ToolError("unsupported_hire_flow", "Only the FL TIME_TO_START hire flow is supported in this phase.", {
+      requestedCapacityArea: args.capacityArea,
+      requestedIssueType: args.issueType,
+      supportedCapacityArea: "FL",
+      supportedIssueType: "TIME_TO_START"
+    });
+  }
+}
+
+function resourceIdsFromHireArgs(args = {}) {
+  const explicitIds = normalizeList(args.selectedResourceIds || args.resourceIds || args.resourceId) || [];
+  const textIds = explicitIds
+    .flatMap((value) => String(typeof value === "object" ? JSON.stringify(value) : value).match(/FL-HIRE-\d{3}/g) || []);
+  const selectedRows = Array.isArray(args.selectedResources) ? args.selectedResources : [];
+  const rowIds = selectedRows
+    .flatMap((row) => Array.isArray(row?.cells) ? row.cells : [])
+    .map((cell) => typeof cell === "string" ? cell : cell?.text)
+    .filter((value) => /^FL-HIRE-\d{3}$/.test(String(value)));
+  return [...new Set([...textIds, ...rowIds])].slice(0, 3);
+}
+
+function selectedHireResources(args = {}) {
+  const selectedIds = resourceIdsFromHireArgs(args);
+  return WFM_HIRE_RECOMMENDATION_OPTIONS.filter((option) => selectedIds.includes(option.resourceId));
+}
+
+function buildWfmHireImpact(args = {}) {
+  const selectedResources = selectedHireResources(args);
+  const selectedResourceIds = selectedResources.map((resource) => resource.resourceId);
+  const count = selectedResources.length;
+  const averagesByCount = [3.6, 3.2, 2.7, 2.4];
+  const withinSevenByCount = [72, 75, 80, 84];
+  const scenarioSeriesByCount = {
+    0: [3.6, 3.7, 3.8, 3.8],
+    1: [3.6, 3.4, 3.3, 3.2],
+    2: [3.6, 3.2, 2.9, 2.7],
+    3: [3.6, 3.1, 2.7, 2.4]
+  };
+  const averageStartDays = averagesByCount[count];
+  const withinSevenDaysPercent = withinSevenByCount[count];
+  const scenarioSeries = scenarioSeriesByCount[count];
+  const totalWeeklyCapacityHours = selectedResources.reduce((sum, resource) => sum + resource.weeklyCapacityHours, 0);
+  const impact = {
+    selectedResourceCount: count,
+    currentAverageStartDays: WFM_HIRE_BASELINE.currentAverageStartDays,
+    projectedAverageStartDays: averageStartDays,
+    targetAverageStartDays: WFM_HIRE_BASELINE.targetAverageStartDays,
+    averageStartDaysImprovement: Number((WFM_HIRE_BASELINE.currentAverageStartDays - averageStartDays).toFixed(1)),
+    currentWithinSevenDaysPercent: WFM_HIRE_BASELINE.currentWithinSevenDaysPercent,
+    projectedWithinSevenDaysPercent: withinSevenDaysPercent,
+    withinSevenDaysImprovementPoints: withinSevenDaysPercent - WFM_HIRE_BASELINE.currentWithinSevenDaysPercent,
+    totalWeeklyCapacityHours
+  };
+  return {
+    generatedAt: BASE_NOW,
+    capacityArea: "FL",
+    capacityAreaName: "Florida",
+    issueType: "TIME_TO_START",
+    selectedResourceIds,
+    selectedResources: selectedResources.map((resource) => ({ ...resource })),
+    impact,
+    proposalText: proposalTextForHireImpact({ selectedResources, impact }),
+    chart: {
+      title: "Projected FL time-to-start improvement",
+      chartWidgetConfig: {
+        type: "line",
+        data: {
+          labels: WFM_HIRE_BASELINE.forecastPeriods,
+          datasets: [
+            {
+              label: "No hire forecast",
+              data: WFM_HIRE_BASELINE.noHireForecastDays
+            },
+            {
+              label: `${count} selected resource${count === 1 ? "" : "s"}`,
+              data: scenarioSeries
+            },
+            {
+              label: "Target",
+              data: WFM_HIRE_BASELINE.forecastPeriods.map(() => WFM_HIRE_BASELINE.targetAverageStartDays)
+            }
+          ]
+        },
+        insights: [
+          count
+            ? `${count} selected resource${count === 1 ? "" : "s"} project average start time to ${averageStartDays} days.`
+            : "No resources selected; the forecast remains above target.",
+          `${withinSevenDaysPercent}% of activities are projected to start within 7 days.`
+        ]
+      }
+    }
+  };
+}
+
+function proposalTextForHireImpact(impactResult = {}) {
+  const selectedResources = impactResult.selectedResources || [];
+  const impact = impactResult.impact || {};
+  const count = selectedResources.length;
+  const locations = selectedResources.map((resource) => resource.location).join(", ") || "Florida";
+  const skills = [...new Set(selectedResources.flatMap((resource) => resource.requiredWorkSkills || []))].join(", ") || "field service";
+  return `I propose to hire/add additional contractors - ${count} people with ${skills} qualifications in ${locations}. Projected average start time improves to ${impact.projectedAverageStartDays ?? WFM_HIRE_BASELINE.currentAverageStartDays} days.`;
 }
 
 function mapGeometryForArea(area, index) {
