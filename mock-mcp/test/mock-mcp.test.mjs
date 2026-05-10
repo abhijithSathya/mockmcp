@@ -272,6 +272,34 @@ test("supports FL time-to-start hire recommendation selection, simulation, and s
   assert.equal(two.impact.projectedWithinSevenDaysPercent, 80);
   assert.equal(two.chart.chartWidgetConfig.type, "line");
 
+  const wrappedIds = await callTool("simulate_time_to_start_hire_impact", {
+    capacityArea: "FL",
+    selectedResourceIds: "Selected rows: FL-HIRE-\n001 and FL-HIRE-\n002"
+  });
+  assert.equal(wrappedIds.impact.projectedAverageStartDays, 2.7);
+  assert.equal(wrappedIds.impact.projectedWithinSevenDaysPercent, 80);
+  assert.equal(wrappedIds.chart.chartWidgetConfig.data.datasets.length, 3);
+  assert.equal(wrappedIds.chart.chartWidgetConfig.data.datasets[1].label, "2 selected resources");
+
+  const selectedRowsSubmit = await callTool("simulate_time_to_start_hire_impact", {
+    capacityArea: "FL",
+    selectedResourceIds: JSON.stringify({
+      value: [
+        {
+          id: "selectedRows",
+          value: [
+            { cells: ["FL-HIRE-\n001", "Orlando contractor pod", "Orlando, FL 32801", "Appliance Repair, Preventive Maintenance", "Customer Premise Equipment", "32"] },
+            { cells: ["FL-HIRE-\n002", "Tampa contractor pod", "Tampa, FL 33602", "HVAC Service, Electrical Diagnostics", "Warranty Repairs", "30"] }
+          ]
+        }
+      ],
+      metadata: { source: "hire_resource_selection", issueType: "TIME_TO_START" }
+    })
+  });
+  assert.equal(selectedRowsSubmit.impact.projectedAverageStartDays, 2.7);
+  assert.equal(selectedRowsSubmit.impact.projectedWithinSevenDaysPercent, 80);
+  assert.equal(selectedRowsSubmit.impact.totalWeeklyCapacityHours, 62);
+
   const three = await callTool("simulate_time_to_start_hire_impact", { capacityArea: "FL", selectedResourceIds: ["FL-HIRE-001", "FL-HIRE-002", "FL-HIRE-003"] });
   assert.equal(three.impact.projectedAverageStartDays, 2.4);
   assert.equal(three.impact.projectedWithinSevenDaysPercent, 84);

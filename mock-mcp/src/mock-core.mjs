@@ -2580,15 +2580,42 @@ function assertFlHireFlow(args = {}) {
 }
 
 function resourceIdsFromHireArgs(args = {}) {
-  const explicitIds = normalizeList(args.selectedResourceIds || args.resourceIds || args.resourceId) || [];
-  const textIds = explicitIds
-    .flatMap((value) => String(typeof value === "object" ? JSON.stringify(value) : value).match(/FL-HIRE-\d{3}/g) || []);
-  const selectedRows = Array.isArray(args.selectedResources) ? args.selectedResources : [];
-  const rowIds = selectedRows
-    .flatMap((row) => Array.isArray(row?.cells) ? row.cells : [])
-    .map((cell) => typeof cell === "string" ? cell : cell?.text)
-    .filter((value) => /^FL-HIRE-\d{3}$/.test(String(value)));
-  return [...new Set([...textIds, ...rowIds])].slice(0, 3);
+  const candidates = [
+    args.selectedResourceIds,
+    args.resourceIds,
+    args.resourceId,
+    args.selectedResources,
+    args.selectedRows,
+    args.value
+  ];
+  return [...new Set(candidates.flatMap(extractHireResourceIds))].slice(0, 3);
+}
+
+function extractHireResourceIds(value, depth = 0) {
+  if (value === undefined || value === null || value === "" || depth > 6) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => extractHireResourceIds(item, depth + 1));
+  if (typeof value === "object") return Object.values(value).flatMap((item) => extractHireResourceIds(item, depth + 1));
+
+  const text = String(value);
+  const directIds = [...text.matchAll(/FL\s*-\s*HIRE\s*-\s*(\d{3})/gi)]
+    .map((match) => `FL-HIRE-${match[1]}`);
+
+  let parsedIds = [];
+  const trimmed = text.trim();
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      parsedIds = extractHireResourceIds(JSON.parse(trimmed), depth + 1);
+    } catch {
+      parsedIds = [];
+    }
+  }
+
+  const normalized = text.toLowerCase();
+  const displayNameIds = WFM_HIRE_RECOMMENDATION_OPTIONS
+    .filter((option) => normalized.includes(option.displayName.toLowerCase()))
+    .map((option) => option.resourceId);
+
+  return [...directIds, ...parsedIds, ...displayNameIds];
 }
 
 function selectedHireResources(args = {}) {
