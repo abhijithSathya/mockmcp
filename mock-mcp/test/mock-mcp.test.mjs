@@ -20,6 +20,9 @@ test("lists tools through MCP", async () => {
   assert.ok(body.result.tools.find((tool) => tool.name === "get_time_to_start_hire_recommendations"));
   assert.ok(body.result.tools.find((tool) => tool.name === "simulate_time_to_start_hire_impact"));
   assert.ok(body.result.tools.find((tool) => tool.name === "save_time_to_start_hire_proposal"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "get_idle_time_resource_move_recommendations"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "simulate_idle_time_resource_move_impact"));
+  assert.ok(body.result.tools.find((tool) => tool.name === "move_idle_time_resources"));
 });
 
 test("supports StreamableHTTP MCP probes and text tool results", async () => {
@@ -312,6 +315,66 @@ test("supports FL time-to-start hire recommendation selection, simulation, and s
   assert.equal(saved.proposal.status, "SAVED");
   assert.equal(saved.proposal.proposedResourceCount, 2);
   assert.ok(saved.proposal.proposalId.startsWith("HIRE-FL-"));
+});
+
+test("supports CA idle-time resource move recommendation, simulation, and apply", async () => {
+  resetState();
+  const recommendations = await callTool("get_idle_time_resource_move_recommendations", {
+    capacityArea: "CA",
+    issueType: "IDLE_TIME"
+  });
+  assert.equal(recommendations.options.length, 3);
+  assert.deepEqual(recommendations.options.map((option) => option.moveOptionId), [
+    "CA-MOVE-001",
+    "CA-MOVE-002",
+    "CA-MOVE-003"
+  ]);
+  assert.ok(recommendations.options[0].resourceId.startsWith("RES-CA-"));
+
+  const one = await callTool("simulate_idle_time_resource_move_impact", {
+    capacityArea: "CA",
+    selectedMoveOptionIds: ["CA-MOVE-001"]
+  });
+  assert.equal(one.impact.projectedIdleTimeMinutes, 55);
+  assert.equal(one.impact.caWithinTarget, false);
+  assert.equal(one.charts.sourceIdleTime.chartWidgetConfig.type, "line");
+  assert.equal(one.charts.targetNeedCoverage.chartWidgetConfig.type, "bar");
+
+  const selectedRowsSubmit = await callTool("simulate_idle_time_resource_move_impact", {
+    capacityArea: "CA",
+    selectedMoveOptionIds: JSON.stringify({
+      value: [
+        {
+          id: "selectedRows",
+          value: [
+            { cells: ["CA-MOVE-\n001", "RES-CA-\n014", "Alicia Chen", "CA", "NY", "Appliance Repair, Preventive Maintenance"] },
+            { cells: ["CA-MOVE-\n002", "RES-CA-\n022", "Marco Rivera", "CA", "TX", "HVAC Service, Electrical Diagnostics"] }
+          ]
+        }
+      ],
+      metadata: { source: "move_resource_selection", issueType: "IDLE_TIME" }
+    })
+  });
+  assert.equal(selectedRowsSubmit.impact.projectedIdleTimeMinutes, 44);
+  assert.equal(selectedRowsSubmit.impact.caWithinTarget, true);
+  assert.equal(selectedRowsSubmit.impact.totalTargetNeedCoveredHours, 66);
+  assert.deepEqual(selectedRowsSubmit.selectedResourceIds, ["RES-CA-014", "RES-CA-022"]);
+
+  const moved = await callTool("move_idle_time_resources", {
+    capacityArea: "CA",
+    selectedMoveOptionIds: ["CA-MOVE-001", "CA-MOVE-002"]
+  });
+  assert.equal(moved.message, "Resources moved");
+  assert.equal(moved.movementBatch.status, "MOVED");
+  assert.equal(moved.movementBatch.movedCount, 2);
+  assert.ok(moved.movementBatch.movementBatchId.startsWith("MOVE-CA-"));
+  assert.deepEqual(moved.movementBatch.targetAreas.sort(), ["NY", "TX"]);
+
+  const afterMove = await callTool("get_idle_time_resource_move_recommendations", {
+    capacityArea: "CA",
+    issueType: "IDLE_TIME"
+  });
+  assert.deepEqual(afterMove.options.map((option) => option.moveOptionId), ["CA-MOVE-003"]);
 });
 
 test("supports demand event memory and forecast adjustment", async () => {

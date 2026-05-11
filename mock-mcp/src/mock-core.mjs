@@ -90,6 +90,83 @@ const WFM_HIRE_BASELINE = {
   noHireForecastDays: [3.6, 3.7, 3.8, 3.8],
   forecastPeriods: ["Current", "+30 days", "+60 days", "+90 days"]
 };
+const WFM_MOVE_BASELINE = {
+  sourceArea: "CA",
+  sourceAreaName: "California",
+  issueType: "IDLE_TIME",
+  currentIdleTimeMinutes: 64,
+  targetIdleTimeMinutes: 45,
+  noMoveForecastMinutes: [64, 66, 68, 69],
+  forecastPeriods: ["Current", "+30 days", "+60 days", "+90 days"]
+};
+const WFM_RESOURCE_MOVE_OPTIONS = [
+  {
+    moveOptionId: "CA-MOVE-001",
+    resourceId: "RES-CA-014",
+    resourceName: "Alicia Chen",
+    sourceArea: "CA",
+    sourceAreaName: "California",
+    targetArea: "NY",
+    targetAreaName: "New York",
+    skills: ["Appliance Repair", "Preventive Maintenance"],
+    targetReason: "NY has an active resource crunch in Appliance Repair coverage.",
+    targetDriver: "CURRENT_RESOURCE_CRUNCH",
+    weeklyCapacityHours: 34,
+    projectedIdleTimeReductionMinutes: 9,
+    targetNeedCoverageHours: 34,
+    recommended: true
+  },
+  {
+    moveOptionId: "CA-MOVE-002",
+    resourceId: "RES-CA-022",
+    resourceName: "Marco Rivera",
+    sourceArea: "CA",
+    sourceAreaName: "California",
+    targetArea: "TX",
+    targetAreaName: "Texas",
+    skills: ["HVAC Service", "Electrical Diagnostics"],
+    targetReason: "TX forecast workload is projected to rise over the next 60 days.",
+    targetDriver: "FORECAST_WORKLOAD_GROWTH",
+    weeklyCapacityHours: 32,
+    projectedIdleTimeReductionMinutes: 11,
+    targetNeedCoverageHours: 32,
+    recommended: true
+  },
+  {
+    moveOptionId: "CA-MOVE-003",
+    resourceId: "RES-CA-031",
+    resourceName: "Priya Shah",
+    sourceArea: "CA",
+    sourceAreaName: "California",
+    targetArea: "NY",
+    targetAreaName: "New York",
+    skills: ["Plumbing", "Compressor Diagnostics"],
+    targetReason: "NY remains short on multi-skill resources for repair work.",
+    targetDriver: "CURRENT_RESOURCE_CRUNCH",
+    weeklyCapacityHours: 28,
+    projectedIdleTimeReductionMinutes: 7,
+    targetNeedCoverageHours: 28,
+    recommended: false
+  }
+];
+const WFM_TARGET_AREA_NEEDS = {
+  NY: {
+    targetArea: "NY",
+    targetAreaName: "New York",
+    needType: "CURRENT_RESOURCE_CRUNCH",
+    currentGapHours: 58,
+    forecastGapHours: 52,
+    targetGapHours: 20
+  },
+  TX: {
+    targetArea: "TX",
+    targetAreaName: "Texas",
+    needType: "FORECAST_WORKLOAD_GROWTH",
+    currentGapHours: 18,
+    forecastGapHours: 44,
+    targetGapHours: 15
+  }
+};
 const sseClients = new Map();
 const mcpEvents = [];
 
@@ -122,6 +199,8 @@ export function getPublicState() {
       workforceScenarios: state.workforceScenarios.length,
       reviewPackages: state.reviewPackages.length,
       hireProposals: state.hireProposals.length,
+      resourceMoveBatches: state.resourceMoveBatches.length,
+      movedResources: state.movedResources.length,
       auditEvents: state.auditEvents.length,
       workforceManagementCapacityAreas: WFM_CAPACITY_AREA_INSIGHTS.length
     },
@@ -574,6 +653,42 @@ const TOOL_METADATA = {
         selectedResourceIds: arrayOrString("Selected resource option IDs such as FL-HIRE-001."),
         selectedResources: { type: "array", items: { type: "object" }, description: "Selected row objects from the app multi-select widget." },
         proposalText: { type: "string", description: "User-facing proposal summary to save." }
+      }
+    }
+  },
+  get_idle_time_resource_move_recommendations: {
+    description: "Return CA idle-time move recommendations with selectable existing resources and target-area rationale.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityArea: { type: "string", description: "Source capacity area code. Only CA is supported for this phase." },
+        issueType: { type: "string", enum: ["IDLE_TIME"], description: "Issue type for the move flow." },
+        limit: { type: "number", description: "Maximum number of move options to return." }
+      }
+    }
+  },
+  simulate_idle_time_resource_move_impact: {
+    description: "Simulate CA idle-time improvement and target-area benefit for selected move options.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityArea: { type: "string", description: "Source capacity area code. Only CA is supported for this phase." },
+        selectedMoveOptionIds: arrayOrString("Selected move option IDs such as CA-MOVE-001."),
+        selectedResourceIds: arrayOrString("Selected resource IDs such as RES-CA-014."),
+        selectedResources: { type: "array", items: { type: "object" }, description: "Selected row objects from the app multi-select widget." }
+      }
+    }
+  },
+  move_idle_time_resources: {
+    description: "Apply selected CA idle-time resource moves in mock state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        capacityArea: { type: "string", description: "Source capacity area code. Only CA is supported for this phase." },
+        selectedMoveOptionIds: arrayOrString("Selected move option IDs such as CA-MOVE-001."),
+        selectedResourceIds: arrayOrString("Selected resource IDs such as RES-CA-014."),
+        selectedResources: { type: "array", items: { type: "object" }, description: "Selected row objects from the app multi-select widget." },
+        proposalText: { type: "string", description: "User-facing movement summary." }
       }
     }
   },
@@ -1244,6 +1359,74 @@ const TOOL_HANDLERS = {
       message: "Recommendation saved"
     };
   },
+  get_idle_time_resource_move_recommendations: (args) => {
+    assertCaMoveFlow(args);
+    const limit = Math.max(1, Math.min(3, Number(args.limit || 3)));
+    const movedIds = new Set(state.movedResources.map((resource) => resource.resourceId));
+    return {
+      generatedAt: BASE_NOW,
+      capacityArea: "CA",
+      capacityAreaName: "California",
+      issueType: "IDLE_TIME",
+      flow: "MOVE_RESOURCE",
+      baseline: { ...WFM_MOVE_BASELINE },
+      observations: [
+        "CA average idle time increased from 52 to 64 minutes over the past 3 months, above the 45 minute target.",
+        "Moving selected CA resources lowers idle time while preserving enough California coverage.",
+        "Target areas are selected because NY has a current resource crunch and TX has forecast workload growth."
+      ],
+      recommendationSummary: "Move existing CA resources to NY and TX; review impact before applying the moves.",
+      options: WFM_RESOURCE_MOVE_OPTIONS
+        .filter((option) => !movedIds.has(option.resourceId))
+        .slice(0, limit)
+        .map((option) => ({ ...option }))
+    };
+  },
+  simulate_idle_time_resource_move_impact: (args) => {
+    assertCaMoveFlow(args);
+    return buildWfmMoveImpact(args);
+  },
+  move_idle_time_resources: (args) => {
+    assertCaMoveFlow(args);
+    const impact = buildWfmMoveImpact(args);
+    const movedResources = impact.selectedResources.map((resource) => ({
+      ...resource,
+      movedAt: BASE_NOW,
+      status: "MOVED"
+    }));
+    const movedIds = new Set(state.movedResources.map((resource) => resource.resourceId));
+    for (const resource of movedResources) {
+      if (!movedIds.has(resource.resourceId)) {
+        state.movedResources.push(resource);
+      }
+    }
+    const movementBatch = {
+      movementBatchId: `MOVE-CA-${String(state.resourceMoveBatches.length + 1).padStart(4, "0")}`,
+      status: "MOVED",
+      createdAt: BASE_NOW,
+      sourceArea: "CA",
+      issueType: "IDLE_TIME",
+      flow: "MOVE_RESOURCE",
+      selectedMoveOptionIds: impact.selectedMoveOptionIds,
+      selectedResourceIds: impact.selectedResourceIds,
+      movedCount: movedResources.length,
+      movedResources,
+      targetAreas: [...new Set(movedResources.map((resource) => resource.targetArea))],
+      proposalText: args.proposalText || proposalTextForMoveImpact(impact),
+      impact: impact.impact
+    };
+    state.resourceMoveBatches.push(movementBatch);
+    audit("move_idle_time_resources", args, {
+      movementBatchId: movementBatch.movementBatchId,
+      movedCount: movementBatch.movedCount,
+      targetAreas: movementBatch.targetAreas
+    });
+    return {
+      generatedAt: BASE_NOW,
+      movementBatch,
+      message: "Resources moved"
+    };
+  },
   get_forecast_workload_series: (args) => {
     const cells = filterCells(args);
     const byDate = groupCells(cells, (cell) => args.granularity === "week" ? weekKey(cell.date) : cell.date);
@@ -1781,6 +1964,8 @@ function createSeedState() {
     workforceScenarios: [],
     reviewPackages: [],
     hireProposals: [],
+    resourceMoveBatches: [],
+    movedResources: [],
     patternLinks: [],
     patternClassifications: [],
     eventAdjustments: [],
@@ -2698,6 +2883,188 @@ function proposalTextForHireImpact(impactResult = {}) {
   const locations = selectedResources.map((resource) => resource.location).join(", ") || "Florida";
   const skills = [...new Set(selectedResources.flatMap((resource) => resource.requiredWorkSkills || []))].join(", ") || "field service";
   return `I propose to hire/add additional contractors - ${count} people with ${skills} qualifications in ${locations}. Projected average start time improves to ${impact.projectedAverageStartDays ?? WFM_HIRE_BASELINE.currentAverageStartDays} days.`;
+}
+
+function assertCaMoveFlow(args = {}) {
+  const capacityArea = String(args.capacityArea || args.sourceArea || "CA").toUpperCase();
+  const issueType = String(args.issueType || "IDLE_TIME").toUpperCase();
+  if (capacityArea !== "CA" || issueType !== "IDLE_TIME") {
+    throw new ToolError("unsupported_resource_move_flow", "Only the CA IDLE_TIME resource move flow is supported in this phase.", {
+      requestedCapacityArea: args.capacityArea || args.sourceArea,
+      requestedIssueType: args.issueType,
+      supportedCapacityArea: "CA",
+      supportedIssueType: "IDLE_TIME"
+    });
+  }
+}
+
+function moveOptionIdsFromArgs(args = {}) {
+  const candidates = [
+    args.selectedMoveOptionIds,
+    args.moveOptionIds,
+    args.moveOptionId,
+    args.selectedResourceIds,
+    args.resourceIds,
+    args.resourceId,
+    args.selectedResources,
+    args.selectedRows,
+    args.value
+  ];
+  return [...new Set(candidates.flatMap(extractMoveOptionIds))].slice(0, 3);
+}
+
+function extractMoveOptionIds(value, depth = 0) {
+  if (value === undefined || value === null || value === "" || depth > 6) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => extractMoveOptionIds(item, depth + 1));
+  if (typeof value === "object") return Object.values(value).flatMap((item) => extractMoveOptionIds(item, depth + 1));
+
+  const text = String(value);
+  const directOptionIds = [...text.matchAll(/CA\s*-\s*MOVE\s*-\s*(\d{3})/gi)]
+    .map((match) => `CA-MOVE-${match[1]}`);
+  const resourceOptionIds = [...text.matchAll(/RES\s*-\s*CA\s*-\s*(\d{3})/gi)]
+    .map((match) => WFM_RESOURCE_MOVE_OPTIONS.find((option) => option.resourceId === `RES-CA-${match[1]}`)?.moveOptionId)
+    .filter(Boolean);
+
+  let parsedIds = [];
+  const trimmed = text.trim();
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      parsedIds = extractMoveOptionIds(JSON.parse(trimmed), depth + 1);
+    } catch {
+      parsedIds = [];
+    }
+  }
+
+  const normalized = text.toLowerCase();
+  const displayNameIds = WFM_RESOURCE_MOVE_OPTIONS
+    .filter((option) => normalized.includes(option.resourceName.toLowerCase()))
+    .map((option) => option.moveOptionId);
+
+  return [...directOptionIds, ...resourceOptionIds, ...parsedIds, ...displayNameIds];
+}
+
+function selectedMoveResources(args = {}) {
+  const selectedIds = moveOptionIdsFromArgs(args);
+  return WFM_RESOURCE_MOVE_OPTIONS.filter((option) => selectedIds.includes(option.moveOptionId));
+}
+
+function buildWfmMoveImpact(args = {}) {
+  const selectedResources = selectedMoveResources(args);
+  const selectedMoveOptionIds = selectedResources.map((resource) => resource.moveOptionId);
+  const selectedResourceIds = selectedResources.map((resource) => resource.resourceId);
+  const count = selectedResources.length;
+  const idleReduction = selectedResources.reduce((sum, resource) => sum + resource.projectedIdleTimeReductionMinutes, 0);
+  const projectedIdleTimeMinutes = Math.max(42, WFM_MOVE_BASELINE.currentIdleTimeMinutes - idleReduction);
+  const idleTimeImprovementMinutes = Number((WFM_MOVE_BASELINE.currentIdleTimeMinutes - projectedIdleTimeMinutes).toFixed(1));
+  const scenarioSeriesByCount = {
+    0: [64, 66, 68, 69],
+    1: [64, 60, 57, 55],
+    2: [64, 56, 50, 44],
+    3: [64, 55, 48, 42]
+  };
+  const scenarioSeries = scenarioSeriesByCount[Math.min(count, 3)];
+  const targetAreaImpacts = Object.values(WFM_TARGET_AREA_NEEDS).map((target) => {
+    const movedToTarget = selectedResources.filter((resource) => resource.targetArea === target.targetArea);
+    const coveredHours = movedToTarget.reduce((sum, resource) => sum + resource.targetNeedCoverageHours, 0);
+    return {
+      ...target,
+      movedResourceCount: movedToTarget.length,
+      coveredHours,
+      projectedGapHours: Math.max(0, target.forecastGapHours - coveredHours)
+    };
+  }).filter((target) => target.movedResourceCount > 0 || count === 0);
+  const totalWeeklyCapacityHours = selectedResources.reduce((sum, resource) => sum + resource.weeklyCapacityHours, 0);
+  const totalTargetNeedCoveredHours = selectedResources.reduce((sum, resource) => sum + resource.targetNeedCoverageHours, 0);
+  const impact = {
+    selectedMoveCount: count,
+    currentIdleTimeMinutes: WFM_MOVE_BASELINE.currentIdleTimeMinutes,
+    projectedIdleTimeMinutes,
+    targetIdleTimeMinutes: WFM_MOVE_BASELINE.targetIdleTimeMinutes,
+    idleTimeImprovementMinutes,
+    caWithinTarget: projectedIdleTimeMinutes <= WFM_MOVE_BASELINE.targetIdleTimeMinutes,
+    totalWeeklyCapacityHours,
+    totalTargetNeedCoveredHours,
+    targetAreaImpacts
+  };
+  return {
+    generatedAt: BASE_NOW,
+    capacityArea: "CA",
+    capacityAreaName: "California",
+    issueType: "IDLE_TIME",
+    selectedMoveOptionIds,
+    selectedResourceIds,
+    selectedResources: selectedResources.map((resource) => ({ ...resource })),
+    impact,
+    proposalText: proposalTextForMoveImpact({ selectedResources, impact }),
+    charts: {
+      sourceIdleTime: {
+        title: "Projected CA idle-time improvement",
+        chartWidgetConfig: {
+          type: "line",
+          data: {
+            labels: WFM_MOVE_BASELINE.forecastPeriods,
+            datasets: [
+              {
+                label: "No move forecast",
+                data: WFM_MOVE_BASELINE.noMoveForecastMinutes
+              },
+              {
+                label: `${count} selected move${count === 1 ? "" : "s"}`,
+                data: scenarioSeries
+              },
+              {
+                label: "Target",
+                data: WFM_MOVE_BASELINE.forecastPeriods.map(() => WFM_MOVE_BASELINE.targetIdleTimeMinutes)
+              }
+            ]
+          },
+          insights: [
+            count
+              ? `${count} selected move${count === 1 ? "" : "s"} project CA idle time to ${projectedIdleTimeMinutes} minutes.`
+              : "No resources selected; CA idle time remains above target.",
+            projectedIdleTimeMinutes <= WFM_MOVE_BASELINE.targetIdleTimeMinutes
+              ? "Selected moves bring CA idle time within target."
+              : "Additional moves are needed to reach the CA idle-time target."
+          ]
+        }
+      },
+      targetNeedCoverage: {
+        title: "Target-area need coverage after moves",
+        chartWidgetConfig: {
+          type: "bar",
+          data: {
+            labels: targetAreaImpacts.map((target) => target.targetArea),
+            datasets: [
+              {
+                label: "Forecast gap hours before move",
+                data: targetAreaImpacts.map((target) => target.forecastGapHours)
+              },
+              {
+                label: "Gap hours after selected moves",
+                data: targetAreaImpacts.map((target) => target.projectedGapHours)
+              },
+              {
+                label: "Acceptable gap target",
+                data: targetAreaImpacts.map((target) => target.targetGapHours)
+              }
+            ]
+          },
+          insights: targetAreaImpacts.map((target) =>
+            `${target.targetArea} receives ${target.coveredHours} weekly hours for ${target.needType.toLowerCase().replace(/_/g, " ")}.`
+          )
+        }
+      }
+    }
+  };
+}
+
+function proposalTextForMoveImpact(impactResult = {}) {
+  const selectedResources = impactResult.selectedResources || [];
+  const impact = impactResult.impact || {};
+  const count = selectedResources.length;
+  const targets = [...new Set(selectedResources.map((resource) => `${resource.targetAreaName} (${resource.targetArea})`))].join(", ") || "target areas";
+  const names = selectedResources.map((resource) => `${resource.resourceName} / ${resource.resourceId}`).join(", ") || "selected CA resources";
+  return `Move ${count} CA resource${count === 1 ? "" : "s"} (${names}) to ${targets}. Projected CA idle time improves to ${impact.projectedIdleTimeMinutes ?? WFM_MOVE_BASELINE.currentIdleTimeMinutes} minutes.`;
 }
 
 function mapGeometryForArea(area, index) {
